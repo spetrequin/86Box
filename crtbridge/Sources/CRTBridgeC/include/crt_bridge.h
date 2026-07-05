@@ -1,0 +1,127 @@
+// crt_bridge.h — flat C ABI surface for CRTEngine.
+//
+// This is the contract a C/C++/Obj-C++ host (e.g. an 86Box Qt renderer) compiles
+// against. The implementation lives in the Swift target `CRTBridgeC` as @_cdecl
+// functions; symbols resolve at link time against libCRTBridgeC.dylib. Metal
+// objects cross the boundary as opaque `void *` — on the host side they are
+// `id<MTL...>` passed with `(__bridge void *)`, on the Swift side they are
+// recovered via Unmanaged.
+//
+// Two creation/preset families:
+//   * crt_bridge_create / _apply_preset       — load resources via Bundle.module
+//                                                (SwiftPM/Xcode hosts).
+//   * crt_bridge_create2 / _apply_preset_file  — load metallib + presets from
+//                                                explicit paths (CMake/.app hosts).
+#ifndef CRT_BRIDGE_H
+#define CRT_BRIDGE_H
+
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Opaque handle to a live CRT filter + scaling state.
+typedef void *CRTBridgeRef;
+
+// --- Creation -------------------------------------------------------------
+
+// Create the engine. `device` is an id<MTLDevice>. phosphorW/H is the internal
+// phosphor-buffer (render) resolution. Returns NULL on failure. Shaders + presets
+// load from CRTEngine's own resource bundle (Bundle.module), which the app bundles
+// into Contents/Resources so the engine stays unmodified.
+CRTBridgeRef crt_bridge_create(void *device, int phosphorW, int phosphorH);
+
+// --- Preset selection -----------------------------------------------------
+
+// Configure for a named preset (e.g. "VGA monitor", "NTSC color"), loading the
+// preset list via Bundle.module. contentW/H = the emulated source resolution.
+// Returns false if the preset name is unknown or the bundle is missing.
+bool crt_bridge_apply_preset(CRTBridgeRef ref, const char *presetName,
+                             int contentW, int contentH);
+
+// --- Dynamic state --------------------------------------------------------
+
+// Re-apply the current preset at a new emulated resolution. Call when 86Box
+// switches video mode (mon_xsize/mon_ysize change).
+void crt_bridge_set_content_size(CRTBridgeRef ref, int contentW, int contentH);
+
+// Set the host display's refresh rate (Hz) for correct field cadence.
+void crt_bridge_set_display_refresh(CRTBridgeRef ref, float hz);
+
+// Detect host display capabilities (EDR headroom, refresh, scale) from an
+// NSScreen* (or NULL for the main screen) and push them into the engine. Call
+// at init and on screen changes. Sets edrBoost + stripe brightness compensation.
+void crt_bridge_update_display(CRTBridgeRef ref, void *nsScreen);
+
+// The display's currently-available EDR headroom (1.0 = SDR, >1 = HDR). The host
+// uses this to decide whether to put its CAMetalLayer in EDR (rgba16Float) mode.
+float crt_bridge_edr_headroom(CRTBridgeRef ref);
+
+// Set the fixed phosphor render width (px); higher = finer stripes/mask, more
+// GPU. 0 = render at the window size. Default 2880.
+void crt_bridge_set_render_resolution(CRTBridgeRef ref, int width);
+
+// Display-only RGB mask scale (the "1x/2x/3x" control): a multiplier of the
+// engine's algorithmic finest pitch. 1.0 = finest (1px per aperture-grille stripe
+// = 3px triplet); 2.0 / 3.0 = coarser. Clamped [1,3]. Seeded from CRT_MASK_SCALE.
+void crt_bridge_set_mask_scale(CRTBridgeRef ref, float scale);
+
+// HDR mask softening [0..1]: how much the mask fades toward flat as EDR headroom
+// rises, taming the harsh crosshatch on HDR panels. Display-only; no effect on SDR.
+void crt_bridge_set_hdr_mask_dim(CRTBridgeRef ref, float amount);
+
+// Turn HDR (EDR peak-brightness boost) on/off. On = use the display's EDR headroom;
+// off = clamp to SDR.
+void crt_bridge_set_hdr_enabled(CRTBridgeRef ref, bool enabled);
+
+// Switch CRT preset at runtime (at the current content size, keeping user overrides).
+// e.g. "VGA monitor", "NTSC color", "Green CRT monitor". Returns false if unknown.
+bool crt_bridge_set_preset(CRTBridgeRef ref, const char *presetName);
+
+// --- Picture + phosphor pattern + monitor conditions (live, for an options UI) ---
+void crt_bridge_set_brightness(CRTBridgeRef ref, float v);        // -0.4 .. +0.5
+void crt_bridge_set_contrast(CRTBridgeRef ref, float v);          // 0.1 .. 3.0
+// Phosphor pattern: 0=triode, 1=stripe (aperture grille), 2=shadow mask, 3=slot.
+void crt_bridge_set_phosphor_pattern(CRTBridgeRef ref, int pattern);
+// Beam controls.
+void crt_bridge_set_sharpness(CRTBridgeRef ref, float s);         // 0=soft .. 1=sharp
+void crt_bridge_set_edge_focus(CRTBridgeRef ref, float v);        // 0..1
+void crt_bridge_set_bloom(CRTBridgeRef ref, float v);            // 0..~0.5
+void crt_bridge_set_convergence(CRTBridgeRef ref, float v);       // px, 0..~1
+// Monitor conditions.
+void crt_bridge_set_h_jitter(CRTBridgeRef ref, float v);          // px, 0..~3
+void crt_bridge_set_v_jitter(CRTBridgeRef ref, float v);          // scanlines, 0..~2
+void crt_bridge_set_shot_noise(CRTBridgeRef ref, float v);        // 0..~0.05
+void crt_bridge_set_signal_noise(CRTBridgeRef ref, float v);      // 0..~0.15
+
+// Lay the screen out for a given drawable size (the on-screen widget size).
+void crt_bridge_set_drawable_size(CRTBridgeRef ref, int width, int height);
+
+// --- Per-frame ------------------------------------------------------------
+
+// Render one frame. `inputTexture` and `commandBuffer` are id<MTLTexture> /
+// id<MTLCommandBuffer>. `time` is a monotonic seconds clock driving beam sweep
+// and phosphor decay. Returns the simulated output as id<MTLTexture> (borrowed,
+// owned by the engine, valid until the next render) or NULL.
+void *crt_bridge_render(CRTBridgeRef ref, void *inputTexture, float time,
+                        void *commandBuffer);
+
+// Run the sim and render the CRT directly into `target` (an id<MTLTexture>) at the
+// target's own resolution, using the engine's display shader (its own downscale +
+// mask LOD). The host presents `target` 1:1 — no host scaling of the phosphor, so
+// no resample moiré. `target` should be 4:3. Returns false on failure.
+bool crt_bridge_render_display(CRTBridgeRef ref, void *inputTexture, float time,
+                               void *commandBuffer, void *target);
+
+// Resize the phosphor/output buffers.
+void crt_bridge_resize(CRTBridgeRef ref, int width, int height);
+
+// Release the engine.
+void crt_bridge_destroy(CRTBridgeRef ref);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // CRT_BRIDGE_H

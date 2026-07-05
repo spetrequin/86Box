@@ -394,6 +394,76 @@ endif()
 
 if (APPLE)
     target_sources(ui PRIVATE macos_event_filter.mm)
+
+    # Native Metal CRT renderer (RENDERER_METAL). The presentation core is
+    # framework-agnostic; the Qt shell wraps it in a QWindow. Links the system
+    # Metal/QuartzCore/AppKit frameworks.
+    target_sources(ui PRIVATE
+        metal_presenter.h
+        metal_presenter.mm
+        qt_metalrenderer.hpp
+        qt_metalrenderer.mm
+    )
+    find_library(METAL_LIB Metal)
+    find_library(QUARTZCORE_LIB QuartzCore)
+    find_library(APPKIT_LIB AppKit)
+    target_link_libraries(ui PRIVATE ${METAL_LIB} ${QUARTZCORE_LIB} ${APPKIT_LIB})
+
+    # --- CRTBridge (RENDERER_METAL gets the real CRTEngine phosphor simulation) ---
+    # CRTBridge is a small Swift package IN THE 86BOX TREE (src is at crtbridge/)
+    # that wraps the *unmodified* CRTEngine behind a C ABI. CMake builds it as part
+    # of the 86Box build: `swift build` produces libCRTBridgeC.dylib + CRTEngine's
+    # resource bundle; we compile CRTEngine's shaders into that bundle (reading the
+    # engine read-only) so the bridge loads them via Bundle.module. Configure the
+    # engine location with -DCRTENGINE_DIR=/path/to/CRTEngine.
+    set(CRTENGINE_DIR "$ENV{HOME}/Projects/Code/Swift/CRTEngine" CACHE PATH "CRTEngine Swift package root")
+    set(CRTBRIDGE_DIR "${CMAKE_SOURCE_DIR}/crtbridge")
+    if(EXISTS "${CRTBRIDGE_DIR}/Package.swift" AND EXISTS "${CRTENGINE_DIR}/Package.swift")
+        set(CRTBRIDGE_DYLIB    "${CRTBRIDGE_DIR}/.build/release/libCRTBridgeC.dylib")
+        set(CRTENGINE_BUNDLE   "${CRTBRIDGE_DIR}/.build/release/CRTEngine_CRTEngine.bundle")
+
+        # Build the bridge (CRTENGINE_DIR is how Package.swift finds the engine),
+        # then compile CRTEngine's Metal shaders INTO the built resource bundle so
+        # Bundle.module can load them. swift build is incremental (fast no-op).
+        add_custom_target(crtbridge
+            COMMAND ${CMAKE_COMMAND} -E env CRTENGINE_DIR=${CRTENGINE_DIR}
+                    swift build -c release --product CRTBridgeC
+            COMMAND ${CRTBRIDGE_DIR}/build-metallib.sh
+                    ${CRTENGINE_DIR} ${CRTENGINE_BUNDLE}/default.metallib
+            WORKING_DIRECTORY ${CRTBRIDGE_DIR}
+            BYPRODUCTS ${CRTBRIDGE_DYLIB}
+            COMMENT "Building CRTBridge (Swift) + CRTEngine shader metallib"
+            USES_TERMINAL)
+        add_dependencies(ui crtbridge)
+
+        target_include_directories(ui PRIVATE "${CRTBRIDGE_DIR}/Sources/CRTBridgeC/include")
+        target_link_libraries(ui PRIVATE ${CRTBRIDGE_DYLIB})
+        target_compile_definitions(ui PRIVATE USE_CRTENGINE)
+        # rpath: bundled dylib (Contents/Frameworks) in a shipped app, build-tree
+        # copy for dev. The dylib's own rpath resolves the Swift runtime in
+        # /usr/lib/swift (macOS 12+).
+        set_target_properties(86Box PROPERTIES
+            BUILD_RPATH   "${CRTBRIDGE_DIR}/.build/release;@executable_path/../Frameworks"
+            INSTALL_RPATH "@executable_path/../Frameworks")
+
+        # Bundle the dylib (Frameworks) + CRTEngine's resource bundle (Resources,
+        # where Bundle.module finds it via Bundle.main) INTO 86Box.app. Separate
+        # target ordered after 86Box (which is defined in src/, not here).
+        set(_crt_fw  "$<TARGET_BUNDLE_CONTENT_DIR:86Box>/Frameworks")
+        set(_crt_res "$<TARGET_BUNDLE_CONTENT_DIR:86Box>/Resources")
+        add_custom_target(crtbundle ALL
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_crt_fw}" "${_crt_res}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CRTBRIDGE_DYLIB}" "${_crt_fw}/"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CRTENGINE_BUNDLE}"
+                    "${_crt_res}/CRTEngine_CRTEngine.bundle"
+            COMMENT "Bundling CRTBridge dylib + CRTEngine resource bundle into 86Box.app"
+            VERBATIM)
+        add_dependencies(crtbundle 86Box)
+        message(STATUS "CRTBridge enabled (bridge=${CRTBRIDGE_DIR}, engine=${CRTENGINE_DIR})")
+    else()
+        message(STATUS "CRTBridge/CRTEngine not found; Metal renderer builds as stub (no CRT sim)")
+    endif()
+
     if(MOLTENVK)
         find_path(MOLTENVK_INCLUDE "vulkan/vulkan.h" PATHS "/opt/homebrew/opt/molten-vk/libexec/include" "/usr/local/opt/molten-vk/libexec/include" ${MOLTENVK_INCLUDE_DIR})
         if (NOT MOLTENVK_INCLUDE)

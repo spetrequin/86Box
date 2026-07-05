@@ -22,12 +22,14 @@
 #define RENDERER_NAME_QT_OPENGLES "qt_opengles"
 #define RENDERER_NAME_QT_OPENGL3  "qt_opengl3"
 #define RENDERER_NAME_QT_VULKAN   "qt_vulkan"
+#define RENDERER_NAME_QT_METAL    "qt_metal"
 #define RENDERER_NAME_VNC         "vnc"
 
 #define RENDERER_SOFTWARE 0
 #define RENDERER_OPENGL3  1
 #define RENDERER_VULKAN   2
 #define RENDERER_VNC      3
+#define RENDERER_METAL    4 /* Apple only */
 
 #ifdef __cplusplus
 extern "C" {

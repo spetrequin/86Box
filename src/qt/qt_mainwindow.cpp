@@ -560,6 +560,11 @@ MainWindow::MainWindow(QWidget *parent)
     actGroup->addAction(ui->actionSoftware_Renderer);
     actGroup->addAction(ui->actionOpenGL_3_0_Core);
     actGroup->addAction(ui->actionVulkan);
+#ifdef Q_OS_MACOS
+    actGroup->addAction(ui->actionMetal);
+#else
+    ui->actionMetal->setVisible(false);
+#endif
     actGroup->addAction(ui->actionVNC);
     actGroup->setExclusive(true);
 
@@ -587,6 +592,11 @@ MainWindow::MainWindow(QWidget *parent)
             case RENDERER_VULKAN:
                 newVidApi = RendererStack::Renderer::Vulkan;
                 break;
+#ifdef Q_OS_MACOS
+            case RENDERER_METAL:
+                newVidApi = RendererStack::Renderer::Metal;
+                break;
+#endif
 #ifdef USE_VNC
             case RENDERER_VNC:
                 {

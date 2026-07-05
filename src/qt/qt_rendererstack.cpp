@@ -22,6 +22,9 @@
 #include "qt_openglrenderer.hpp"
 #include "qt_softwarerenderer.hpp"
 #include "qt_vulkanwindowrenderer.hpp"
+#ifdef Q_OS_MACOS
+#    include "qt_metalrenderer.hpp"
+#endif
 
 #include "qt_mainwindow.hpp"
 #include "qt_util.hpp"
@@ -461,6 +464,29 @@ RendererStack::createRenderer(Renderer renderer)
                 break;
             }
 #endif
+#ifdef Q_OS_MACOS
+        case Renderer::Metal:
+            {
+                this->createWinId();
+                this->rendererTakesScreenshots = false;
+                auto hw        = new MetalRenderer(this);
+                rendererWindow = hw;
+                connect(this, &RendererStack::blitToRenderer, hw, &MetalRenderer::onBlit, Qt::QueuedConnection);
+                connect(hw, &MetalRenderer::rendererInitialized, [=]() {
+                    /* Buffers are available only after initialization. */
+                    imagebufs        = rendererWindow->getBuffers();
+                    switchInProgress = false;
+                    emit rendererChanged();
+                });
+                connect(hw, &MetalRenderer::errorInitializing, [=]() {
+                    /* Renderer could not initialize, fall back to software. */
+                    imagebufs = {};
+                    QTimer::singleShot(0, this, [this]() { switchRenderer(Renderer::Software); });
+                });
+                current.reset(this->createWindowContainer(hw));
+                break;
+            }
+#endif
     }
     if (current.get() == nullptr) {
         return;
@@ -478,7 +504,8 @@ RendererStack::createRenderer(Renderer renderer)
 
     currentBuf = 0;
 
-    if (renderer != Renderer::OpenGL3 && renderer != Renderer::Vulkan) {
+    if (renderer != Renderer::OpenGL3 && renderer != Renderer::Vulkan
+        && renderer != Renderer::Metal) {
         imagebufs        = rendererWindow->getBuffers();
         switchInProgress = false;
         emit rendererChanged();
