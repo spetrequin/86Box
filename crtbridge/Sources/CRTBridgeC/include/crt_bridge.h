@@ -43,10 +43,24 @@ bool crt_bridge_apply_preset(CRTBridgeRef ref, const char *presetName,
 // --- Dynamic state --------------------------------------------------------
 
 // Re-apply the current preset at a new emulated resolution. Call when 86Box
-// switches video mode (mon_xsize/mon_ysize change).
+// switches video mode (mon_xsize/mon_ysize change). Prefer crt_bridge_set_signal.
 void crt_bridge_set_content_size(CRTBridgeRef ref, int contentW, int contentH);
 
-// Set the host display's refresh rate (Hz) for correct field cadence.
+// THE SIGNAL ON THE WIRE. What the emulated video card is sending: active
+// resolution + its TRUE vertical refresh, straight from the CRTC
+// (monitor_t.mon_signal_refresh_hz). Call on every mode change.
+//
+// One-way, like the real VGA cable: the card pushes, the tube reacts, nothing comes
+// back. Resolution and refresh travel together because a mode change alters both at
+// once. refreshHz = 0 means "this card doesn't report timings" (CGA/MDA/EGA today) —
+// the bridge falls back to the VGA standards table.
+//
+// NOTE: this is the EMULATED CARD's refresh, not the host monitor's. For the latter
+// see crt_bridge_set_display_refresh — they are different concepts, do not conflate.
+void crt_bridge_set_signal(CRTBridgeRef ref, int activeW, int activeH, float refreshHz);
+
+// Set the HOST display's refresh rate (Hz) for correct field cadence. This is the
+// physical panel 86Box's window is on — NOT the emulated card's signal refresh.
 void crt_bridge_set_display_refresh(CRTBridgeRef ref, float hz);
 
 // Detect host display capabilities (EDR headroom, refresh, scale) from an
@@ -75,6 +89,11 @@ void crt_bridge_set_hdr_mask_dim(CRTBridgeRef ref, float amount);
 // off = clamp to SDR.
 void crt_bridge_set_hdr_enabled(CRTBridgeRef ref, bool enabled);
 
+// HDR/EDR boost as a continuous control: 1.0 = none (i.e. "off"), 3.0 = maximum. One
+// slider instead of a toggle. The engine still clamps the mask compensation by the
+// display's ACTUAL headroom, so asking for more than the panel has cannot blow it out.
+void crt_bridge_set_hdr_boost(CRTBridgeRef ref, float boost);   // 1.0 .. 3.0
+
 // Switch CRT preset at runtime (at the current content size, keeping user overrides).
 // e.g. "VGA monitor", "NTSC color", "Green CRT monitor". Returns false if unknown.
 bool crt_bridge_set_preset(CRTBridgeRef ref, const char *presetName);
@@ -100,10 +119,33 @@ void crt_bridge_set_drawable_size(CRTBridgeRef ref, int width, int height);
 
 // --- Per-frame ------------------------------------------------------------
 
+// PRESENT ONE FRAME — run the CRT and put it on the drawable. This is the call a
+// display host wants: the engine owns the whole display tail.
+//
+// Do NOT use crt_bridge_render() and scale the result yourself. The phosphor buffer
+// holds a 1px RGB mask and a scanline comb — content at Nyquist — so it must be
+// band-limited on the way out at EVERY scale ratio (point-sampling it because you
+// happen to be magnifying will alias, in triode too), and the engine's linear,
+// above-1.0 output must be encoded to match the drawable. Both are engine policy.
+//
+// `sdrEncoded` describes the DRAWABLE — only the host knows this:
+//   false = extended-linear float (rgba16Float + extendedLinear*) — engine writes
+//           linear; the OS tonemaps above-white against the panel's EDR headroom.
+//   true  = 8-bit gamma-encoded (bgra8Unorm + DisplayP3/sRGB) — engine soft-clips
+//           above-white peaks and applies the BT.709 OETF.
+// Writing linear into a gamma-encoded drawable reads DARK, and no brightness or
+// contrast setting can correct it — it is a transfer-function mismatch.
+//
+// The picture is placed with the ENGINE's aspect-preserving viewport, so the host
+// does not compute an aspect fit either. Returns false on failure.
+bool crt_bridge_present(CRTBridgeRef ref, void *inputTexture, float time,
+                        void *target, void *commandBuffer, bool sdrEncoded);
+
 // Render one frame. `inputTexture` and `commandBuffer` are id<MTLTexture> /
 // id<MTLCommandBuffer>. `time` is a monotonic seconds clock driving beam sweep
 // and phosphor decay. Returns the simulated output as id<MTLTexture> (borrowed,
 // owned by the engine, valid until the next render) or NULL.
+// LOW-LEVEL: prefer crt_bridge_present, which also does the display tail correctly.
 void *crt_bridge_render(CRTBridgeRef ref, void *inputTexture, float time,
                         void *commandBuffer);
 

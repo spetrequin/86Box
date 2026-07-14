@@ -33,10 +33,16 @@ All locations are in `src/qt/metal_presenter.mm` (host) or the bridge
 3. **`maskLODBias` computation** — bridge `recomputeLayout`
    `MaskLOD.bias(forRenderWidth:)`. Engine-internal; it knows its own render width.
 
-4. **Scan-doubling** — bridge `multisyncScanlines` (`while lines < 350 { *=2 }`,
-   200→400 / 240→480). This is VGA-monitor physics (low-res modes are
-   double-scanned); belongs in CRTEngine's VGA/multisync path. Host should just
-   pass the raw content resolution.
+4. ~~**Scan-doubling** — bridge `multisyncScanlines`~~ **DONE — deleted, and the
+   premise was wrong.** It does NOT belong in CRTEngine: scan-doubling is the VIDEO
+   CARD's job, not the monitor's. A VGA card re-times a 200-line mode to 400 lines
+   (CRTC `crtc[9]` bit 7) before the signal reaches the cable, so a VGA monitor never
+   sees a 200-line signal. 86Box already models this (`svga->linedbl`), so the raster
+   the bridge receives is already doubled and the `while lines < 350 { *=2 }` loop
+   never fired. Verified empirically that CRTEngine paints exactly the raster it is
+   sent (a 200-line CGA source measures 200 scanlines on screen — it does not double),
+   which is correct: a real CGA monitor painted 200 lines. The bridge now passes the
+   signal's line count through untouched (`signalScanlines`).
 
 5. **EDR/brightness compensation** — bridge `applyDisplayEnvironment`
    (`edrBoost`, `stripeBrightnessBoost` via `EDRCompensation`). Engine should

@@ -48,15 +48,31 @@ protected:
     void exposeEvent(QExposeEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     bool event(QEvent *event) override;
+    void timerEvent(QTimerEvent *event) override;
 
 private:
     void initialize();
     void updateDrawableSize();
 
+    /* Gather the physical display's current capabilities and report them to the
+       engine. The host notices; CRTEngine decides. Called at init and on every
+       event that can change the display under us. */
+    void reportDisplay();
+    void startDisplayObservers();
+    void stopDisplayObservers();
+
     std::unique_ptr<MetalPresenter> presenter;
     std::array<std::unique_ptr<uint8_t[]>, 2> imagebufs;
     bool isInitialized = false;
     bool initFailed    = false;
+
+    /* NSNotificationCenter observer tokens (id), held as void* to keep this header
+       free of Objective-C — see the file comment. */
+    void  *obsScreenParams   = nullptr;   // resolution / arrangement / connect / disconnect
+    void  *obsWindowScreen   = nullptr;   // window dragged to another display
+    void  *obsBackingProps   = nullptr;   // backing-scale (Retina <-> non-Retina) change
+    int    edrPollTimer      = 0;         // EDR headroom has no notification; poll it
+    double lastEdrHeadroom   = -1.0;
 };
 
 #endif // QT_METALRENDERER_HPP

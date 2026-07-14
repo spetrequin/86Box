@@ -92,6 +92,8 @@ struct MetalPresenter::Impl {
     bool           crtOn      = false;
     int            cw         = 0;       // current content (emulated) resolution
     int            ch         = 0;
+    float          signalHz   = 0.0f;    // emulated card's true refresh (0 = unreported)
+    float          sentHz     = -1.0f;   // last refresh pushed to the bridge
     id<MTLTexture> content    = nil;     // the (upscaled) frame fed to the engine
     CFAbsoluteTime startTime  = 0;       // phosphor/beam clock origin
 #endif
@@ -281,6 +283,26 @@ aspectFit(int srcW, int srcH, int dstW, int dstH, float out[4])
 }
 
 #ifdef USE_CRTENGINE
+/* Signal diagnostics. stderr is invisible when the .app is launched from Finder
+   (macOS does not route a GUI app's stdio anywhere readable), so mode changes are
+   also appended to ~/Library/Logs/86Box-crt-signal.log. Mode changes are rare, so
+   the open/close per line costs nothing. */
+static void
+logSignal(const char *what, int w, int h, float hz)
+{
+    fprintf(stderr, "[MetalPresenter] signal -> %dx%d @ %.3f Hz (%s)\n", w, h, hz, what);
+    const char *home = getenv("HOME");
+    if (home == nullptr)
+        return;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/Library/Logs/86Box-crt-signal.log", home);
+    FILE *f = fopen(path, "a");
+    if (f == nullptr)
+        return;
+    fprintf(f, "signal -> %dx%d @ %.3f Hz (%s)\n", w, h, hz, what);
+    fclose(f);
+}
+
 /* Run the framebuffer through CRTEngine and present the simulated result.
    Returns false if the CRT path isn't usable this frame (caller falls back). */
 static bool
@@ -322,16 +344,26 @@ presentCRT(MetalPresenter::Impl *impl, int srcX, int srcY, int srcW, int srcH)
     // output resolution matches the native frame and it hits its 1:1 passthrough
     // path; the engine's beam + downscale own all resampling.
     if (srcW != impl->cw || srcH != impl->ch || impl->content == nil) {
-        fprintf(stderr, "[MetalPresenter] content size -> %dx%d (mode change)\n", srcW, srcH);
-        impl->cw = srcW;
-        impl->ch = srcH;
-        crt_bridge_set_content_size(impl->crt, srcW, srcH);
+        logSignal("mode change", srcW, srcH, impl->signalHz);
+        impl->cw     = srcW;
+        impl->ch     = srcH;
+        impl->sentHz = impl->signalHz;
+        // The whole cable in one push: resolution + the card's true refresh.
+        crt_bridge_set_signal(impl->crt, srcW, srcH, impl->signalHz);
         MTLTextureDescriptor *td =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                                width:srcW height:srcH mipmapped:NO];
         td.usage       = MTLTextureUsageShaderRead;
         td.storageMode = MTLStorageModePrivate;
         impl->content  = [impl->device newTextureWithDescriptor:td];
+    } else if (fabsf(impl->signalHz - impl->sentHz) > 0.05f) {
+        // Same resolution, different rate — e.g. 640x480 60 Hz -> 72 Hz. Still a mode
+        // change as far as the tube is concerned: it has to re-lock to the new sync.
+        // Tolerance, not equality: the CRTC's derived rate jitters in the last decimal
+        // and a real tube would not re-lock over a millihertz.
+        logSignal("refresh change", srcW, srcH, impl->signalHz);
+        impl->sentHz = impl->signalHz;
+        crt_bridge_set_signal(impl->crt, srcW, srcH, impl->signalHz);
     }
 
     id<MTLCommandBuffer> cb = [impl->queue commandBuffer];
@@ -363,35 +395,33 @@ presentCRT(MetalPresenter::Impl *impl, int srcX, int srcY, int srcW, int srcH)
         return true;
     }
 
-    // Render the CRT at the engine's FULL phosphor resolution and get that texture
-    // back (this is what Phosphors does). We must NOT ask the engine to render into
-    // a window-sized target: its display shader samples the phosphor buffer with
-    // trilinear *minification* when the target is smaller than the phosphor buffer,
-    // which moirés the scanline/mask comb on flat fields (visible cross-hatch). By
-    // taking the phosphor-res output and letting our derivative-aware Gaussian
-    // (f_main) do the downscale to the window, the comb is generated at 1:1 (mip 0)
-    // and low-passed cleanly on the way out — no moiré.
-    float t = (float) (CFAbsoluteTimeGetCurrent() - impl->startTime);
-    void *outPtr = crt_bridge_render(impl->crt, (__bridge void *) impl->content, t,
-                                     (__bridge void *) cb);
-    if (outPtr == nullptr) {
-        [cb commit];
-        return false;
-    }
-    id<MTLTexture> crtOut = (__bridge id<MTLTexture>) outPtr;
+    // Hand the frame to CRTEngine and let IT put the picture on our drawable — sim,
+    // band-limited downscale, transfer encoding and aspect-fit viewport, all engine
+    // policy (CRTEngine's DisplayCompositor).
+    //
+    // The host used to do the last step itself (crt_bridge_render + f_main + aspectFit).
+    // That was wrong on two counts, and both were visible: f_main point-sampled whenever
+    // it was magnifying (footprint <= 1), which aliases a 1px mask and the scanline comb —
+    // the artifact showed in triode too, because the comb aliases with no mask present.
+    // And it wrote the engine's LINEAR output straight into whatever the layer was: into
+    // an 8-bit DisplayP3 layer that reads dark, because the display pipeline applies its
+    // EOTF expecting an encoded signal.
+    //
+    // `sdrEncoded` = "our drawable is 8-bit gamma-encoded". It tracks the layer format we
+    // chose in updateDisplay(): bgra8Unorm + DisplayP3 (SDR) vs rgba16Float + extended
+    // linear (EDR). The engine encodes to match.
+    const bool sdrEncoded = (impl->layerFormat != MTLPixelFormatRGBA16Float);
 
     id<CAMetalDrawable> drawable = [impl->layer nextDrawable];
     if (drawable == nil) { [cb commit]; return true; }   // skip frame, not a fallback
-    int dW = (int) drawable.texture.width, dH = (int) drawable.texture.height;
 
-    // Fit the engine's 4:3 output into the drawable, preserving aspect (side bars on
-    // a widescreen window — expected for 4:3 content), and Gaussian-downsample it to
-    // the window. Beam height/spacing is CRTEngine's job; the host just scales the
-    // finished 4:3 image to fill the window.
-    float pos[4];
-    aspectFit((int) crtOut.width, (int) crtOut.height, dW, dH, pos);
-    drawInto(impl, drawable.texture, crtOut, 0, 0, (int) crtOut.width, (int) crtOut.height,
-             pos, impl->sampler, impl->pipeline, cb);
+    float t = (float) (CFAbsoluteTimeGetCurrent() - impl->startTime);
+    if (!crt_bridge_present(impl->crt, (__bridge void *) impl->content, t,
+                            (__bridge void *) drawable.texture, (__bridge void *) cb,
+                            sdrEncoded)) {
+        [cb commit];
+        return false;
+    }
     [cb presentDrawable:drawable];
     [cb commit];
     return true;
@@ -502,6 +532,18 @@ MetalPresenter::setContentSize(int contentW, int contentH)
 }
 
 void
+MetalPresenter::setSignalRefresh(float hz)
+{
+#ifdef USE_CRTENGINE
+    // Recorded now, pushed with the next frame's signal (presentCRT), so resolution
+    // and refresh always reach the engine together.
+    impl->signalHz = hz;
+#else
+    (void) hz;
+#endif
+}
+
+void
 MetalPresenter::setDisplayRefresh(float hz)
 {
 #ifdef USE_CRTENGINE
@@ -543,6 +585,7 @@ void MetalPresenter::setSignalNoise(float v)    { CRT_SET(crt_bridge_set_signal_
 void MetalPresenter::setMaskScale(float v)      { CRT_SET(crt_bridge_set_mask_scale(impl->crt, v),       "crt.maskscale", v); }
 void MetalPresenter::setHdrMaskDim(float v)     { CRT_SET(crt_bridge_set_hdr_mask_dim(impl->crt, v),     "crt.hdrmaskdim", v); }
 void MetalPresenter::setHdrEnabled(bool v)      { CRT_SET(crt_bridge_set_hdr_enabled(impl->crt, v),      "crt.hdrenabled", v ? 1.0f : 0.0f); }
+void MetalPresenter::setHdrBoost(float v)       { CRT_SET(crt_bridge_set_hdr_boost(impl->crt, v),        "crt.hdrboost", v); }
 void MetalPresenter::setPreset(int idx)         { if (idx < 0 || idx >= 6) return; CRT_SET(crt_bridge_set_preset(impl->crt, kCrtPresetNames[idx]), "crt.preset", idx); }
 
 #undef CRT_SET
@@ -593,7 +636,10 @@ MetalPresenter::loadSettings()
     if (has("crt.signalnoise"))  crt_bridge_set_signal_noise(impl->crt, fv("crt.signalnoise"));
     if (has("crt.maskscale"))    crt_bridge_set_mask_scale(impl->crt, fv("crt.maskscale"));
     if (has("crt.hdrmaskdim"))   crt_bridge_set_hdr_mask_dim(impl->crt, fv("crt.hdrmaskdim"));
+    // hdrboost supersedes the old on/off toggle (1.0 = off). Apply the legacy key first so
+    // a user who had HDR switched off keeps that, then let an explicit boost override it.
     if (has("crt.hdrenabled"))   crt_bridge_set_hdr_enabled(impl->crt, fv("crt.hdrenabled") != 0.0f);
+    if (has("crt.hdrboost"))     crt_bridge_set_hdr_boost(impl->crt, fv("crt.hdrboost"));
 #endif
 }
 
@@ -605,9 +651,11 @@ MetalPresenter::updateDisplay(void *nsScreen)
         return;
     crt_bridge_update_display(impl->crt, nsScreen);
 
-    // Put the layer in EDR mode when the display has headroom, so the engine's
-    // >1.0 stripe-brightness boost actually shows instead of clipping in SDR.
-    bool           edr     = crt_bridge_edr_headroom(impl->crt) > 1.05f;
+    // Put the layer in EDR mode whenever the display has ANY headroom above SDR, so the
+    // engine's >1.0 phosphor/mask brightness has somewhere real to go instead of being
+    // soft-clipped into the SDR range. (Was 1.05; a panel reporting even a little headroom
+    // is better served by the float/linear path than by encoding down to 8 bits.)
+    bool           edr     = crt_bridge_edr_headroom(impl->crt) > 1.0f;
     MTLPixelFormat desired = edr ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
 
     if (desired != impl->layerFormat) {

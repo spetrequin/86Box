@@ -39,6 +39,12 @@ private final class CRTBridgeState {
     var preset: CRTPreset?
     var phosphor: PhosphorPreset?
     var contentSize: SIMD2<Int> = SIMD2(640, 480)
+    /// Vertical refresh of the SIGNAL the emulated card is sending, as reported by
+    /// its CRTC (crt_bridge_set_signal). This is what the tube locks to and times its
+    /// beam against — NOT the host display's refresh (that is `filter.displayRefreshRate`,
+    /// set by crt_bridge_set_display_refresh). Keep the two straight.
+    /// 0 = the card did not report it; fall back to the standards table.
+    var signalRefreshHz: Float = 0
     var drawableSize: CGSize = CGSize(width: 0, height: 0)
     /// Fixed phosphor-buffer render width (px). Decouples stripe fineness from
     /// window size; the result is scaled to the drawable. 0 = use the viewport.
@@ -79,6 +85,11 @@ private final class CRTBridgeState {
         Float(ProcessInfo.processInfo.environment["CRT_HDR_MASK_DIM"] ?? "") ?? 0.5
     let displayEnv = DisplayEnvironment()
 
+    /// The engine's display tail (band-limited scale + the drawable's transfer function).
+    /// Rebuilt when the drawable's pixel format or transfer changes — e.g. the window moves
+    /// to an EDR display and the host swaps the layer from bgra8Unorm to rgba16Float.
+    var compositor: DisplayCompositor? = nil
+
     init(device: MTLDevice, filter: CRTFilter, scaling: ScalingManager) {
         self.device = device
         self.filter = filter
@@ -86,32 +97,42 @@ private final class CRTBridgeState {
     }
 }
 
-/// Displayed scanline count for the current mode. A multisync monitor tracks the
-/// input's vertical resolution, but low-res modes (CGA/VGA 200- and 240-line) are
-/// SCAN-DOUBLED on real VGA monitors to ~400/480 displayed lines so the scanline
-/// density stays right — without this, a 200-line mode shows 200 sparse scanlines
-/// spread over the screen (looks like half vertical resolution). A fixed-frequency
-/// monitor uses the preset's value.
-private func multisyncScanlines(_ preset: CRTPreset, _ contentH: Int) -> Int {
+/// Scanline count of the signal on the wire. A multisync monitor paints exactly the
+/// raster it is sent, so this is simply the content height.
+///
+/// It does NOT scan-double. Scan-doubling is the VIDEO CARD's job: a VGA card running
+/// a 200-line mode re-times it to 400 lines (CRTC `crtc[9]` bit 7) before it reaches
+/// the cable, so the monitor never sees a 200-line VGA signal. 86Box models this
+/// (`svga->linedbl`), so the raster arriving here is already doubled. Doubling again
+/// here would be a second, bogus doubling by a device that has no business doing it.
+/// A genuinely 200-line signal (a real CGA card) is painted as 200 lines — which is
+/// what a CGA monitor did.
+///
+/// A fixed-frequency tube has one raster it can paint, so it uses the preset's count.
+private func signalScanlines(_ preset: CRTPreset, _ contentH: Int) -> Int {
     guard preset.multiSync else { return preset.scanlineCount }
-    var lines = contentH
-    while lines < 350 { lines *= 2 }   // 200→400, 240→480; 350/400/480 unchanged
-    return max(200, min(lines, 1024))
+    return max(1, min(contentH, 2048))   // sanity bounds only — no reshaping
 }
 
-/// Vertical refresh (Hz) the emulated card sends for a given NATIVE mode height.
-/// A multisync monitor has no rate of its own — it locks to the signal — so for
-/// multisync presets the refresh comes from the mode, not the preset's scalar.
-/// Simple standard-VGA/VESA table keyed on native scanline count:
-///   ≤400 lines (CGA 200 / EGA 350 / VGA 720×400 text): 70 Hz — the classic
-///     "VGA runs text/400-line at 70 Hz" behavior.
-///   ≥480 lines (VGA 640×480 and SVGA 600/768/1024…): 60 Hz default.
+/// Vertical refresh (Hz) of the signal on the wire.
+///
+/// A multisync monitor has no rate of its own — it LOCKS TO THE SIGNAL — so the rate
+/// comes from the card, never from the preset. 86Box reports its real CRTC-derived
+/// refresh via crt_bridge_set_signal (mon_signal_refresh_hz), and that always wins:
+/// a card does not guess its own timing, it *is* the timing.
+///
+/// The table below is a FALLBACK for cards that don't report yet (CGA/MDA/EGA keep
+/// their timings in their own structs and are not wired up). It is the standards
+/// approximation the bridge used to fabricate for every mode:
+///   <480 lines (CGA 200 / EGA 350 / VGA 720×400 text): 70 Hz
+///   ≥480 lines (VGA 640×480 and SVGA 600/768/1024…):   60 Hz
 /// Fixed-frequency presets (TVs) keep their own physical rate (59.94/50).
-/// Exact per-mode timing lives in 86Box's CRTC; a future set_signal_refresh()
-/// could feed the precise value and supersede this table.
-private func signalRefreshHz(_ preset: CRTPreset, _ contentH: Int) -> Float {
+private func signalRefreshHz(_ state: CRTBridgeState,
+                             _ preset: CRTPreset,
+                             _ contentH: Int) -> Float {
     guard preset.multiSync else { return preset.refreshRate }
-    return contentH < 480 ? 70.0 : 60.0
+    if state.signalRefreshHz > 0 { return state.signalRefreshHz }   // the card's truth
+    return contentH < 480 ? 70.0 : 60.0                             // fallback guess
 }
 
 /// Active phosphor pattern: host override if set, else the preset's.
@@ -151,18 +172,16 @@ private func applyDisplayEnvironment(_ state: CRTBridgeState) {
     let edrBoost = env.edrMultiplier
     state.filter.parameters.display.edrBoost = edrBoost
 
+    // Mask brightness compensation is ENGINE policy — call it, don't re-derive it. The
+    // bridge used to duplicate this formula inline, which is exactly how the two drift
+    // apart: the engine's version can be fixed and the host quietly keeps the old bug.
+    // (EDRCompensation returns 1.0 for triode, whose sub-pixels are co-located and need
+    // no area compensation; edrBoost is applied separately in-shader.)
     let pattern = state.filter.parameters.phosphor.colorPhosphorPattern
-    if pattern >= 1 && pattern <= 3 {
-        // Stripe/mask/slot: each pixel lights only 1 of R/G/B → ~3x perceptual
-        // compensation, capped by the display's currently-available headroom.
-        let idealBoost = edrBoost * EDRCompensation.stripePerceptualCompensation
-        let peakSafe = Float(max(1.0, env.edrCurrent)) * EDRCompensation.headroomSafetyFactor
-        state.filter.parameters.display.stripeBrightnessBoost =
-            max(EDRCompensation.defaultSDRFloor, min(idealBoost, peakSafe))
-    } else {
-        // Triode: full coverage; edrBoost is applied separately in-shader.
-        state.filter.parameters.display.stripeBrightnessBoost = 1.0
-    }
+    state.filter.parameters.display.stripeBrightnessBoost =
+        EDRCompensation.stripeBrightnessBoost(pattern: pattern,
+                                              edrBoost: edrBoost,
+                                              edrHeadroom: Float(env.edrCurrent))
 }
 
 // MARK: - Internal helpers
@@ -175,32 +194,39 @@ private func applyPresetInternal(_ state: CRTBridgeState,
     state.phosphor = phosphor
     state.contentSize = content
 
-    // Multisync: the scanline structure tracks the input's vertical resolution.
-    // CRTEngine is used unmodified, so we apply the preset normally and then set
-    // the scanline count directly on the public timing parameters (the VGA
-    // encoder keeps the preset's max-output budget, which is fine).
-    let scanlines = multisyncScanlines(preset, content.y)
+    // Multisync: the tube paints the raster it is sent, so the scanline structure is
+    // the signal's own line count. CRTEngine is used unmodified, so we apply the
+    // preset normally and then set the scanline count directly on the public timing
+    // parameters (the VGA encoder keeps the preset's max-output budget, which is fine).
+    let scanlines = signalScanlines(preset, content.y)
     // Signal refresh tracks the mode for multisync monitors (e.g. 70 Hz for VGA
     // 720×400 text, 60 Hz for 640×480+); fixed-freq tubes keep the preset's rate.
-    let refreshHz = signalRefreshHz(preset, content.y)
+    let refreshHz = signalRefreshHz(state, preset, content.y)
     state.filter.applyPreset(preset, phosphor: phosphor, contentSize: content)
     state.filter.parameters.timing.scanRate = refreshHz
     state.filter.parameters.timing.crtRefreshRate = refreshHz
     state.filter.parameters.timing.interlaced = preset.interlaced
     state.filter.parameters.timing.scanlineCount = Int32(scanlines)
 
-    // The beam paints `vgaEncoder.scanlineCount` scanlines (CRTFilter sets
-    // crtUniforms.scanlineCount = vga.scanlineCount), and applyPreset configured the
-    // encoder to the preset's MAX-output budget (e.g. 600). For a MULTISYNC monitor
-    // the displayed line count must track the input instead (480 for a 640x480
-    // mode) — otherwise the beam paints far more scanlines than the window can
-    // resolve and they beat into uneven "bunches and gaps". Re-point the encoder's
-    // output at the multisync count; its output then matches the native content, so
-    // the encode pass runs 1:1 (passthrough) — no horizontal resample.
+    // Point the VGA encoder at the ACTUAL signal — the card knows its mode, so the
+    // preset's default resolution is overridden. The encode then runs 1:1 and every
+    // sample the card sent survives to the beam.
+    //
+    // The width must come from the SIGNAL, not from the tube's aspect ratio. The
+    // preset-driven `configureMaxOutput` derives width as scanlineCount × 4/3, which is
+    // right for the 4:3 graphics modes by coincidence (480×4/3 = 640, 600×4/3 = 800,
+    // 768×4/3 = 1024) and wrong for the text modes, which have NON-SQUARE pixels: DOS
+    // text is 720×400, and 400×4/3 = 533 — so a quarter of the horizontal detail was
+    // resampled away before the beam ever saw the signal, and 9px character cells went
+    // soft. The non-square aspect is real and is resolved where a real monitor resolves
+    // it: when the beam paints the signal across the 4:3 glass.
+    //
+    // `scanlines` is the signal's line count for a multisync tube, or the preset's fixed
+    // raster for a fixed-frequency tube — the raster the beam actually paints.
     if state.filter.isVGAPipeline {
-        state.filter.vgaEncoder?.configureMaxOutput(scanlineCount: scanlines,
-                                                     refreshRate: refreshHz,
-                                                     aspectRatio: 4.0 / 3.0)
+        state.filter.vgaEncoder?.configureSignalResolution(width: content.x,
+                                                           height: scanlines,
+                                                           refreshRate: refreshHz)
         state.filter.vgaEncoder?.configure(sourceWidth: content.x,
                                            sourceHeight: content.y,
                                            refreshRate: refreshHz)
@@ -227,7 +253,7 @@ private func recomputeLayout(_ state: CRTBridgeState) {
     guard let preset = state.preset,
           state.drawableSize.width > 0, state.drawableSize.height > 0 else { return }
     _ = state.scaling.updateDrawableSize(state.drawableSize)
-    let scanlines = multisyncScanlines(preset, Int(state.contentSize.y))
+    let scanlines = signalScanlines(preset, Int(state.contentSize.y))
 
     // Render resolution is an ENGINE decision now (D2): the bridge reports the
     // display fact — the CRT-content width in backing pixels — and CRTEngine's
@@ -378,6 +404,8 @@ public func crt_bridge_set_preset(_ ref: UnsafeMutableRawPointer,
 // MARK: - C ABI: dynamic state
 
 /// Re-apply the current preset at a new emulated resolution (86Box mode change).
+/// Prefer crt_bridge_set_signal, which carries the refresh too; this leaves the
+/// refresh at whatever was last reported.
 @_cdecl("crt_bridge_set_content_size")
 public func crt_bridge_set_content_size(_ ref: UnsafeMutableRawPointer,
                                         _ contentW: Int32,
@@ -388,6 +416,43 @@ public func crt_bridge_set_content_size(_ ref: UnsafeMutableRawPointer,
                         content: SIMD2(Int(contentW), Int(contentH)))
 }
 
+/// THE SIGNAL ON THE WIRE — one atomic description of what the emulated card is
+/// sending: active resolution and the card's true vertical refresh (from its CRTC).
+///
+/// This is the whole cable. It is one-way, exactly like VGA: the card pushes, the
+/// tube reacts. Nothing is reported back, because a monitor has no way to talk to a
+/// video card. The bridge's job is only to be an HONEST card — real timings, no
+/// invention — and CRTEngine's job is to respond correctly to whatever arrives.
+///
+/// Resolution and refresh change together on a mode switch, so they are set together;
+/// setting them in two calls would leave the engine briefly timed against the old
+/// mode's rate at the new mode's resolution.
+///
+/// `refreshHz` = 0 means the card doesn't report its timing (CGA/MDA/EGA today) —
+/// the bridge then falls back to the VGA standards table.
+@_cdecl("crt_bridge_set_signal")
+public func crt_bridge_set_signal(_ ref: UnsafeMutableRawPointer,
+                                  _ activeW: Int32,
+                                  _ activeH: Int32,
+                                  _ refreshHz: Float) {
+    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
+    guard let preset = state.preset, let phosphor = state.phosphor else { return }
+
+    let content = SIMD2(Int(activeW), Int(activeH))
+    // Ignore absurd rates rather than time the beam against garbage; 0 = not reported.
+    let hz: Float = (refreshHz > 20.0 && refreshHz < 200.0) ? refreshHz : 0.0
+
+    // Re-locking is expensive (rebuilds the layout, scaler and VGA encoder), so only a
+    // REAL sync change counts. The CRTC's derived rate jitters in the last decimal
+    // (70.086 vs 70.087 on the same mode); a tube would not re-lock over a millihertz.
+    let resolutionChanged = content != state.contentSize
+    let refreshChanged    = abs(hz - state.signalRefreshHz) > 0.05   // Hz
+    guard resolutionChanged || refreshChanged else { return }
+
+    state.signalRefreshHz = hz
+    applyPresetInternal(state, preset: preset, phosphor: phosphor, content: content)
+}
+
 @_cdecl("crt_bridge_set_display_refresh")
 public func crt_bridge_set_display_refresh(_ ref: UnsafeMutableRawPointer,
                                            _ hz: Float) {
@@ -395,9 +460,20 @@ public func crt_bridge_set_display_refresh(_ ref: UnsafeMutableRawPointer,
     state.filter.displayRefreshRate = hz
 }
 
-/// Detect the host display's capabilities (EDR headroom, refresh, scale) from an
-/// NSScreen and push them into the filter. `screenPtr` is an NSScreen* (or NULL
-/// to use the main screen). Call at init and whenever the window changes screen.
+/// Report the PHYSICAL DISPLAY to the engine: geometry, PPI, EDR headroom, refresh —
+/// everything CRTEngine needs to render optimally for this panel. `screenPtr` is an
+/// NSScreen* (or NULL for the main screen).
+///
+/// Call at init AND on every event that changes the display: window moved to another
+/// screen, resolution or scaled-mode change, backing-scale change, EDR/HDR change,
+/// display connect/disconnect. The host's only job here is to notice and report; the
+/// engine decides what to do about it (mask pitch, render resolution, HDR dimming).
+///
+/// This re-runs the LAYOUT, not just the EDR/brightness compensation: under
+/// `.displayOnly` the phosphor pitch is anchored to the panel's physical pixels and
+/// the render width is derived from it, so a new panel means a new layout. Updating
+/// the environment without re-laying-out would leave the engine rendering a mask
+/// sized for the display it is no longer on.
 @_cdecl("crt_bridge_update_display")
 public func crt_bridge_update_display(_ ref: UnsafeMutableRawPointer,
                                       _ screenPtr: UnsafeMutableRawPointer?) {
@@ -406,7 +482,8 @@ public func crt_bridge_update_display(_ ref: UnsafeMutableRawPointer,
         Unmanaged<NSScreen>.fromOpaque($0).takeUnretainedValue()
     }
     state.displayEnv.updateScreen(screen ?? NSScreen.main)
-    applyDisplayEnvironment(state)
+    recomputeLayout(state)          // panel-anchored pitch + render width re-derive
+    applyDisplayEnvironment(state)  // EDR boost + stripe compensation (needs the new pattern)
 }
 
 /// The display's currently-available EDR headroom (1.0 = SDR, >1 = HDR capable).
@@ -454,6 +531,24 @@ public func crt_bridge_set_hdr_mask_dim(_ ref: UnsafeMutableRawPointer, _ amount
 public func crt_bridge_set_hdr_enabled(_ ref: UnsafeMutableRawPointer, _ enabled: Bool) {
     let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
     state.displayEnv.edrMode = enabled ? .auto : .off
+    applyDisplayEnvironment(state)
+}
+
+/// HDR/EDR boost as a continuous user control (1.0 = none … 3.0 = maximum), replacing the
+/// old on/off toggle: 1.0 IS "off", so one control covers the whole range and the user can
+/// dial how much of the panel's headroom the phosphors spend.
+///
+/// Engine policy, not host policy — CRTEngine owns the EDR response; the bridge only
+/// reports the display and passes on what the user asked for. `.forceOn` here means "use
+/// this boost", not "pretend the display has headroom": the mask compensation is still
+/// clamped by the panel's ACTUAL headroom inside the engine, so asking for 3.0 on a display
+/// that cannot deliver it does not blow the picture out.
+@_cdecl("crt_bridge_set_hdr_boost")
+public func crt_bridge_set_hdr_boost(_ ref: UnsafeMutableRawPointer, _ boost: Float) {
+    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
+    let v = max(1.0, min(3.0, boost))
+    state.displayEnv.edrMode = .forceOn
+    state.displayEnv.manualEDRBoost = v
     applyDisplayEnvironment(state)
 }
 
@@ -585,6 +680,63 @@ public func crt_bridge_render(_ ref: UnsafeMutableRawPointer,
     }
     // Borrowed: the engine owns/reuses this texture across frames.
     return Unmanaged.passUnretained(out as AnyObject).toOpaque()
+}
+
+/// Run the CRT and put it on the host's drawable — the whole display tail, in the engine.
+///
+/// This replaces "crt_bridge_render() then scale it yourself". The host must NOT hand-roll
+/// that last step: the phosphor buffer carries a 1px RGB mask and a scanline comb (content
+/// at Nyquist), so it has to be band-limited on the way out at EVERY scale ratio, and the
+/// engine's linear >1.0 output has to be encoded to match whatever the drawable actually
+/// is. Both are engine policy; see CRTEngine's DisplayCompositor.
+///
+/// `sdrEncoded` describes the DRAWABLE, and only the host knows it:
+///   false → extended-linear float drawable (rgba16Float + extendedLinear*): write linear,
+///           let the OS tonemap above-white against the panel's real EDR headroom.
+///   true  → 8-bit gamma drawable (bgra8Unorm + DisplayP3/sRGB): soft-clip the above-white
+///           peaks and apply the BT.709 OETF. Writing linear here reads DARK.
+/// Get this wrong and no brightness/contrast setting can rescue the picture.
+///
+/// The picture is placed using the ENGINE's viewport (aspect-preserving, pillar/letterboxed),
+/// so the host does not compute an aspect fit either.
+@_cdecl("crt_bridge_present")
+public func crt_bridge_present(_ ref: UnsafeMutableRawPointer,
+                               _ inputPtr: UnsafeMutableRawPointer,
+                               _ time: Float,
+                               _ targetPtr: UnsafeMutableRawPointer,
+                               _ cmdPtr: UnsafeMutableRawPointer,
+                               _ sdrEncoded: Bool) -> Bool {
+    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
+    guard let input = object(inputPtr, as: MTLTexture.self),
+          let target = object(targetPtr, as: MTLTexture.self),
+          let cmd = object(cmdPtr, as: MTLCommandBuffer.self) else {
+        NSLog("[CRTBridge] present: bad input/target/commandBuffer")
+        return false
+    }
+
+    let transfer: PipelineFactory.DisplayTransfer = sdrEncoded ? .sdrEncoded : .linear
+    if state.compositor == nil
+        || state.compositor?.colorPixelFormat != target.pixelFormat
+        || state.compositor?.transfer != transfer {
+        do {
+            state.compositor = try DisplayCompositor(device: state.device,
+                                                     colorPixelFormat: target.pixelFormat,
+                                                     transfer: transfer)
+        } catch {
+            NSLog("[CRTBridge] present: compositor build failed: \(error)")
+            return false
+        }
+    }
+    guard let compositor = state.compositor,
+          let out = state.filter.render(inputTexture: input, time: time, commandBuffer: cmd) else {
+        return false
+    }
+
+    compositor.composite(crtOutput: out,
+                         to: target,
+                         viewport: state.scaling.viewport,
+                         commandBuffer: cmd)
+    return true
 }
 
 /// Run the phosphor simulation and render the CRT directly into `targetPtr`

@@ -1122,6 +1122,28 @@ svga_recalctimings(svga_t *svga)
     _dispontime *= crtcconst;
     _dispofftime *= crtcconst;
 
+    /* True vertical refresh of the signal this card is sending, for consumers that
+       need the real CRT timing (the Metal CRT renderer feeds it to CRTEngine, which
+       times its electron beam against it) instead of guessing from the resolution.
+
+       (_dispontime + _dispofftime) is one scanline in timer ticks, where a tick is
+       1/cpuclock second scaled by 2^32 (svga->clock = cpuclock / pixelclock * 2^32,
+       see VGACONST1/2 in pit.c). So a frame is that times vtotal, and:
+
+           refresh = (cpuclock * 2^32) / (ticks_per_scanline * vtotal)
+
+       Checks out against the standards: 640x480 (25.175 MHz, 800x525) -> 59.94 Hz,
+       720x400 text (28.322 MHz, 900x449) -> 70.1 Hz. Use the unrounded doubles so
+       the sub-Hz precision survives. */
+    if (svga->monitor != NULL) {
+        const double line_ticks = _dispontime + _dispofftime;
+        if ((line_ticks > 0.0) && (svga->vtotal > 0))
+            svga->monitor->mon_signal_refresh_hz =
+                (cpuclock * 4294967296.0) / (line_ticks * (double) svga->vtotal);
+        else
+            svga->monitor->mon_signal_refresh_hz = 0.0;
+    }
+
     svga->dispontime  = (uint64_t) (int64_t) round(_dispontime);
     svga->dispofftime = (uint64_t) (int64_t) round(_dispofftime);
     if (svga->dispontime < TIMER_USEC)

@@ -41,7 +41,13 @@ public:
     /* Tell the engine the emulated resolution changed (86Box mode switch). */
     void setContentSize(int contentW, int contentH);
 
-    /* Host display refresh (Hz) for correct field cadence. */
+    /* The EMULATED CARD's true vertical refresh (Hz), from its CRTC — the rate the
+       simulated tube locks to. Pushed with the resolution on a mode change.
+       0 = the active card doesn't report timings; the bridge then falls back. */
+    void setSignalRefresh(float hz);
+
+    /* HOST display refresh (Hz) for correct field cadence — the physical panel, not
+       the emulated card. Different concept from setSignalRefresh. */
     void setDisplayRefresh(float hz);
 
     /* Detect host-display capabilities (EDR/HDR headroom, refresh, scale) from an
@@ -64,7 +70,8 @@ public:
     void setSignalNoise(float v);
     void setMaskScale(float v);             /* RGB mask 1x/2x/3x (multiplier of finest) */
     void setHdrMaskDim(float v);            /* 0..1 mask softening under HDR */
-    void setHdrEnabled(bool v);             /* HDR (EDR boost) on/off */
+    void setHdrEnabled(bool v);             /* HDR (EDR boost) on/off — superseded by setHdrBoost */
+    void setHdrBoost(float v);              /* HDR/EDR boost 1.0 (none) .. 3.0 (max) */
     void setPreset(int idx);                /* CRT preset by index (see kCrtPresetNames) */
 
     /* Persistence (NSUserDefaults). loadSettings() applies any saved user

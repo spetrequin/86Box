@@ -129,6 +129,11 @@ typedef struct monitor_t {
     int                      mon_unscaled_size_y;
     double                   mon_res_x;
     double                   mon_res_y;
+    /* Vertical refresh (Hz) of the signal the emulated CARD is sending, derived from
+       its CRTC timings — NOT the host display's refresh. This is the rate a real
+       monitor would lock to. 0 = the active card does not report it (a consumer
+       should then fall back). Set by the card's recalctimings. */
+    double                   mon_signal_refresh_hz;
     int                      mon_bpp;
     bitmap_t                *target_buffer;
     int                      mon_video_timing_read_b;

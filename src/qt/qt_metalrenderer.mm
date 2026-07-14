@@ -15,6 +15,7 @@
 
 #include <QApplication>
 #include <QResizeEvent>
+#include <QTimerEvent>
 #include <QScreen>
 #include <QDialog>
 #include <QFormLayout>
@@ -50,7 +51,11 @@ MetalRenderer::MetalRenderer(QWidget *parent)
     buf_usage[1].clear();
 }
 
-MetalRenderer::~MetalRenderer() = default;
+MetalRenderer::~MetalRenderer()
+{
+    // The notification blocks capture `this`; they must never outlive it.
+    stopDisplayObservers();
+}
 
 uint32_t
 MetalRenderer::getBytesPerRow()
@@ -103,10 +108,14 @@ MetalRenderer::initialize()
     // 640x480 is just a seed. No-op in stub builds (returns false) — we then
     // present straight, exactly as before.
     presenter->enableCRT("VGA monitor", 640, 480);
-    if (screen())
-        presenter->setDisplayRefresh(float(screen()->refreshRate()));
-    // Feed host-display capabilities (EDR/HDR headroom, refresh) to the engine.
-    presenter->updateDisplay((__bridge void *) qtView.window.screen);
+
+    // Report the physical display to the engine, and keep reporting it: the panel is
+    // not a constant. The user can drag the window to a different monitor, change the
+    // resolution or scaled mode, plug in an external display, or turn HDR on — and
+    // CRTEngine's mask pitch and render resolution are all anchored to the panel, so
+    // a stale report means it is rendering for a display that is no longer there.
+    reportDisplay();
+    startDisplayObservers();
 
     fprintf(stderr, "[MetalRenderer] renderer initialized for monitor %d (%dx%d), CRT=%s\n",
             r_monitor_index, int(width()), int(height()),
@@ -127,6 +136,133 @@ MetalRenderer::updateDrawableSize()
     presenter->resizeDrawable(int(width() * dpr), int(height() * dpr));
 }
 
+/* ---- Physical display: gather + report (the host's whole job here) --------------
+   The division of labour (CRTEngine docs/RenderIntent-DisplayVsRecording.md §1): the
+   host reports WHAT the display is; the engine decides HOW to render for it. So this
+   makes no rendering decisions — it hands over the NSScreen and lets CRTEngine
+   re-derive phosphor pitch, render resolution, mask LOD and HDR dimming itself. */
+
+/* Same file log as the signal diagnostics: a Finder-launched .app has nowhere to put
+   stderr. Display changes are rare, so the open/close per line is free. */
+static void
+logDisplay(NSScreen *s, double scale)
+{
+    const char *home = getenv("HOME");
+    if (home == nullptr)
+        return;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/Library/Logs/86Box-crt-signal.log", home);
+    FILE *f = fopen(path, "a");
+    if (f == nullptr)
+        return;
+    const NSRect fr = s.frame;
+    fprintf(f, "display -> \"%s\" %.0fx%.0f pts @%.1fx  EDR %.2f\n",
+            s.localizedName.UTF8String, fr.size.width, fr.size.height, scale,
+            s.maximumExtendedDynamicRangeColorComponentValue);
+    fclose(f);
+}
+
+void
+MetalRenderer::reportDisplay()
+{
+    if (!isInitialized)
+        return;
+
+    NSView *qtView = reinterpret_cast<NSView *>(winId());
+    NSScreen *nsScreen = qtView.window.screen ?: NSScreen.mainScreen;
+    if (nsScreen == nil)
+        return;
+
+    logDisplay(nsScreen, nsScreen.backingScaleFactor);
+
+    // Backing scale can change with the display (Retina <-> non-Retina), so re-pin the
+    // layer's contentsScale and drawable size before reporting.
+    updateDrawableSize();
+
+    if (screen())
+        presenter->setDisplayRefresh(float(screen()->refreshRate()));
+    presenter->updateDisplay((__bridge void *) nsScreen);
+
+    lastEdrHeadroom = nsScreen.maximumExtendedDynamicRangeColorComponentValue;
+}
+
+void
+MetalRenderer::startDisplayObservers()
+{
+    NSView *qtView = reinterpret_cast<NSView *>(winId());
+    NSWindow *win  = qtView.window;
+    NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+
+    // Fires for resolution / scaled-mode changes, display arrangement changes, and
+    // monitors being connected or disconnected.
+    obsScreenParams = (__bridge_retained void *) [nc
+        addObserverForName:NSApplicationDidChangeScreenParametersNotification
+                    object:nil
+                     queue:NSOperationQueue.mainQueue
+                usingBlock:^(NSNotification *) { reportDisplay(); }];
+
+    // The window was dragged onto a different display.
+    obsWindowScreen = (__bridge_retained void *) [nc
+        addObserverForName:NSWindowDidChangeScreenNotification
+                    object:win
+                     queue:NSOperationQueue.mainQueue
+                usingBlock:^(NSNotification *) { reportDisplay(); }];
+
+    // Backing scale factor changed (e.g. moved between a Retina and a 1x display).
+    obsBackingProps = (__bridge_retained void *) [nc
+        addObserverForName:NSWindowDidChangeBackingPropertiesNotification
+                    object:win
+                     queue:NSOperationQueue.mainQueue
+                usingBlock:^(NSNotification *) { reportDisplay(); }];
+
+    // EDR headroom has NO notification — it drifts with screen brightness and with
+    // HDR content appearing elsewhere on the display. Poll it; it is one cheap
+    // property read, and we only re-report when it actually moves.
+    edrPollTimer = startTimer(1000);
+}
+
+void
+MetalRenderer::stopDisplayObservers()
+{
+    NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+    if (obsScreenParams != nullptr) {
+        [nc removeObserver:(__bridge_transfer id) obsScreenParams];
+        obsScreenParams = nullptr;
+    }
+    if (obsWindowScreen != nullptr) {
+        [nc removeObserver:(__bridge_transfer id) obsWindowScreen];
+        obsWindowScreen = nullptr;
+    }
+    if (obsBackingProps != nullptr) {
+        [nc removeObserver:(__bridge_transfer id) obsBackingProps];
+        obsBackingProps = nullptr;
+    }
+    if (edrPollTimer != 0) {
+        killTimer(edrPollTimer);
+        edrPollTimer = 0;
+    }
+}
+
+void
+MetalRenderer::timerEvent(QTimerEvent *event)
+{
+    if (event->timerId() != edrPollTimer) {
+        QWindow::timerEvent(event);
+        return;
+    }
+    if (!isInitialized)
+        return;
+
+    NSView *qtView = reinterpret_cast<NSView *>(winId());
+    NSScreen *nsScreen = qtView.window.screen ?: NSScreen.mainScreen;
+    if (nsScreen == nil)
+        return;
+
+    const double edr = nsScreen.maximumExtendedDynamicRangeColorComponentValue;
+    if (std::fabs(edr - lastEdrHeadroom) > 0.05)   // real change, not float noise
+        reportDisplay();
+}
+
 void
 MetalRenderer::onBlit(int buf_idx, int x, int y, int w, int h)
 {
@@ -137,6 +273,11 @@ MetalRenderer::onBlit(int buf_idx, int x, int y, int w, int h)
     }
 
     presenter->upload(imagebufs[buf_idx].get(), x, y, w, h, getBytesPerRow());
+
+    // The emulated card's TRUE vertical refresh, straight from its CRTC. The bridge
+    // is a video card and a cable: it reports what the card is really sending and
+    // never invents it. 0 = this card doesn't report timings (CGA/MDA/EGA today).
+    presenter->setSignalRefresh(float(monitors[r_monitor_index].mon_signal_refresh_hz));
 
     // Done with this buffer; free the other for the blit thread (matches the
     // software/opengl handshake: clear the *other* flag).
@@ -231,10 +372,11 @@ MetalRenderer::getOptions(QWidget *parent)
     addSlider(form, tr("Contrast"),    0.1, 3.0, p->persistedValue("crt.contrast", 1.5),    [p](float v) { p->setContrast(v); });
 
     addSection(form, tr("HDR"));
-    auto *hdrEnable = new QCheckBox();
-    hdrEnable->setChecked(p->persistedValue("crt.hdrenabled", 1.0) != 0.0);
-    QObject::connect(hdrEnable, &QCheckBox::toggled, [p](bool on) { p->setHdrEnabled(on); });
-    form->addRow(tr("Enable HDR"), hdrEnable);
+    // One control instead of a toggle: 1.0 IS "off", so the user dials how much of the
+    // panel's headroom the phosphors spend rather than flipping between none and a fixed
+    // amount. The engine clamps this by the display's real headroom, so a high setting on
+    // a display that can't deliver it won't blow the picture out.
+    addSlider(form, tr("HDR boost"), 1.0, 3.0, p->persistedValue("crt.hdrboost", 1.6), [p](float v) { p->setHdrBoost(v); });
     // Softens the phosphor mask as EDR headroom rises, so it doesn't read as a harsh
     // crosshatch on HDR panels. 0 = crisp (may be harsh), 1 = strongly softened.
     addSlider(form, tr("Mask softening"), 0.0, 1.0, p->persistedValue("crt.hdrmaskdim", 0.5), [p](float v) { p->setHdrMaskDim(v); });
