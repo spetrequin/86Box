@@ -46,11 +46,11 @@ private final class CRTBridgeState {
     /// 0 = the card did not report it; fall back to the standards table.
     var signalRefreshHz: Float = 0
     var drawableSize: CGSize = CGSize(width: 0, height: 0)
-    /// Fixed phosphor-buffer render width (px). Decouples stripe fineness from
-    /// window size; the result is scaled to the drawable. 0 = use the viewport.
-    /// 2880 = Phosphors' 4:3 "4K" default (== MaskLOD.referenceWidth, so the mask
-    /// renders cleanly with zero LOD fade).
-    var renderResolutionWidth: Int = 2880
+    /// USER override of the phosphor-buffer render width (px). 0 = let CRTEngine decide,
+    /// which is the normal case: render resolution is engine policy for a display-only
+    /// host (D2 — the engine sizes it from its own viewport). Non-zero only if the host
+    /// explicitly pins it via crt_bridge_set_render_resolution.
+    var renderWidthOverride: Int = 0
     /// `.displayOnly` RGB mask scale — a multiplier of the engine's algorithmic
     /// finest pitch. 1.0 (default) = finest (1px per aperture-grille stripe = 3px
     /// triplet); 2.0/3.0 = coarser (the "1x/2x/3x" render-options control). Set via
@@ -255,42 +255,61 @@ private func recomputeLayout(_ state: CRTBridgeState) {
     _ = state.scaling.updateDrawableSize(state.drawableSize)
     let scanlines = signalScanlines(preset, Int(state.contentSize.y))
 
-    // Render resolution is an ENGINE decision now (D2): the bridge reports the
-    // display fact — the CRT-content width in backing pixels — and CRTEngine's
-    // policy decides the render width. (Rationale for rendering at ~display width
-    // rather than oversampling lives in ScalingManager.autoDisplayRenderWidth /
-    // docs/RenderIntent-DisplayVsRecording.md.) We hold the chosen width locally too,
-    // for the sharpness→beamFalloff mapping and maskLODBias below; it comes from the
-    // same policy, so there is one source of truth and no divergence.
-    let dispW = min(Float(state.drawableSize.width),
-                    Float(state.drawableSize.height) * 4.0 / 3.0)
-    state.renderResolutionWidth = ScalingManager.autoDisplayRenderWidth(contentWidth: Int(dispW))
-
     // Physical panel fact for the engine's panel-anchored pitch: native panel px per
     // framebuffer(backing) px. 1.0 in native display mode; < 1 in a scaled desktop
     // mode where the OS resamples the framebuffer down onto the panel. Falls back to
-    // 1.0 until the display env is known.
+    // 1.0 until the display env is known. This is a FACT WE REPORT, not a decision.
     let info = state.displayEnv.info
     let framebufferW = Float(info.logicalSize.width) * Float(info.backingScaleFactor)
     let panelNativeW = Float(info.nativePixelWidth)
     let panelScale: Float = (framebufferW > 1 && panelNativeW > 1) ? (panelNativeW / framebufferW) : 1.0
-    let pxPerScanline = max(2, Int((Float(state.renderResolutionWidth) * 3.0 / 4.0)
-                                    / Float(max(1, scanlines))))
 
-    // Beam falloff: from the perceptually-linear sharpness dial if the user set
-    // it, else the preset's value. The dial maps to a Gaussian σ anchored to the
-    // scanline cell, so the full slider travel is useful at any resolution (raw
-    // beamFalloff is wildly non-linear — all the visible change is in ~0.7…0.9).
-    let beamFalloff: Float
+    // Build the layout with the preset's beam, then — only if the user moved the
+    // sharpness dial — rebuild it with the mapped falloff.
+    //
+    // The dial is a perceptually-linear UI mapping onto a Gaussian σ anchored to the
+    // SCANLINE CELL, so the full travel stays useful at any resolution (raw beamFalloff
+    // is wildly non-linear; all the visible change lives in ~0.7…0.9). That mapping needs
+    // the scanline spacing — which is the ENGINE's number, not ours. So we ask the engine
+    // for a layout, read `pixelsPerScanline` off it, and map against that. The bridge used
+    // to estimate the spacing itself from a render width it also computed itself; both are
+    // engine decisions, and re-deriving them here is exactly how the two drift apart.
+    // computeLayout is pure arithmetic, so the second pass is free.
+    func layout(beamFalloff: Float) -> CRTScreenLayout {
+        state.scaling.computeLayout(makeInputs(state, preset, scanlines, beamFalloff, panelScale))
+    }
+    var chosen = layout(beamFalloff: preset.beamFalloff)
     if let s = state.sharpnessOverride {
-        let spacing = Float(pxPerScanline)
+        let spacing = max(2.0, chosen.pixelsPerScanline)
         let sigma = BeamSharpness.sigma(forSharpness: s, scanlineSpacing: spacing)
-        beamFalloff = BeamSharpness.falloff(forSigma: sigma, scanlineSpacing: spacing)
-    } else {
-        beamFalloff = preset.beamFalloff
+        chosen = layout(beamFalloff: BeamSharpness.falloff(forSigma: sigma, scanlineSpacing: spacing))
     }
 
-    let inputs = CRTLayoutInputs(
+    state.scaling.applyLayoutState(chosen)
+    state.filter.apply(chosen)
+
+    // NOT set here any more: maskLODBias. `filter.apply(layout)` derives it from the
+    // layout's render width (engine policy, MaskLOD) — the bridge was recomputing the
+    // identical number and pushing it straight back in.
+
+    // Re-apply convergence — pixelScale tracks the engine's render resolution, and
+    // apply(layout) can reset beam params. Keeps the user's setting consistent.
+    // (Still host-side: the engine takes convergence in phosphor pixels, so someone has
+    // to scale the user's resolution-independent value. Engine-side would be better —
+    // METAL_CRT_FUTURE_CLEANUP item 6.)
+    applyConvergence(state)
+}
+
+/// The facts the engine needs to decide a layout. Everything here is either a SIGNAL fact
+/// (scanline count, interlace), a PRESET fact (tube geometry, phosphor), a DISPLAY fact
+/// (drawable size, panel scale), or a USER choice (pattern, mask scale). Nothing here is a
+/// rendering decision — those belong to CRTEngine.
+private func makeInputs(_ state: CRTBridgeState,
+                        _ preset: CRTPreset,
+                        _ scanlines: Int,
+                        _ beamFalloff: Float,
+                        _ panelScale: Float) -> CRTLayoutInputs {
+    CRTLayoutInputs(
         scanlineCount: scanlines,
         aspectRatio: 4.0 / 3.0,
         drawableSize: state.drawableSize,
@@ -306,33 +325,26 @@ private func recomputeLayout(_ state: CRTBridgeState) {
         tvSizeInches: preset.tvSizeInches,
         phosphorPitchMM: preset.phosphorPitchMM,
         phosphorMagnification: preset.phosphorMagnification,
-        // Render the phosphor buffer at the display resolution and present 1:1.
-        renderResolutionWidth: state.renderResolutionWidth,
-        // minStripePixels now unused on the .displayOnly path (the engine uses the
-        // panel-anchored displayStripePixels instead); kept 2.0 as a safe fallback.
+        // RENDER RESOLUTION IS THE ENGINE'S DECISION (D2). 0 = "you decide": for
+        // .displayOnly the engine sizes the phosphor buffer from its own viewport
+        // (ScalingManager.autoDisplayRenderWidth). The bridge used to compute the
+        // aspect-fitted content width and call that policy itself — deciding, with extra
+        // steps. `renderWidthOverride` is non-zero only when the user pins it explicitly
+        // (crt_bridge_set_render_resolution).
+        renderResolutionWidth: state.renderWidthOverride,
+        // minStripePixels is unused on the .displayOnly path (the engine uses its
+        // panel-anchored pitch instead); 2.0 is the resample-safe fallback.
         minStripePixels: 2.0,
-        // 86Box presents 1:1 to a physical panel and never records — display-only.
+        // 86Box presents 1:1 to a physical panel and never records — display-only. There
+        // is no movie resolution to balance the mask against, unlike Phosphors.
         renderIntent: .displayOnly,
-        // Report the physical panel facts; the engine decides the pitch. backing→
-        // panel scale = native panel px per framebuffer(backing) px (1.0 native;
-        // <1 in a scaled "More Space" desktop where the OS resamples to the panel).
+        // Report the physical panel facts; the engine decides the pitch. backing→panel
+        // scale = native panel px per framebuffer(backing) px (1.0 native; <1 in a scaled
+        // "More Space" desktop where the OS resamples the framebuffer onto the panel).
         backingToPanelScale: panelScale,
         // RGB mask scale (1x/2x/3x) — multiplier of the engine's algorithmic finest.
         displayMaskScale: state.displayMaskScale
     )
-    let layout = state.scaling.computeLayout(inputs)
-    state.scaling.applyLayoutState(layout)
-    state.filter.apply(layout)
-
-    // Mask/stripe LOD fade — now that we render at the display resolution,
-    // renderResolutionWidth IS the resolution the mask is viewed at, so the engine's
-    // stock LOD policy applies directly (extra fade below its 2880 reference; none
-    // above). No oversample means no phosphor→window downscale to defeat it.
-    state.filter.maskLODBias = MaskLOD.bias(forRenderWidth: state.renderResolutionWidth)
-
-    // Re-apply convergence — pixelScale may have changed with the render res, and
-    // apply(layout) can reset beam params. Keeps the user's setting consistent.
-    applyConvergence(state)
 }
 
 // MARK: - C ABI: creation
@@ -500,7 +512,7 @@ public func crt_bridge_edr_headroom(_ ref: UnsafeMutableRawPointer) -> Float {
 public func crt_bridge_set_render_resolution(_ ref: UnsafeMutableRawPointer,
                                              _ width: Int32) {
     let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    state.renderResolutionWidth = Int(max(0, width))
+    state.renderWidthOverride = Int(max(0, width))   // 0 = let the engine decide
     recomputeLayout(state)
 }
 
