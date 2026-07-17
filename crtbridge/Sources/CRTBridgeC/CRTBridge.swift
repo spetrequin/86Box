@@ -249,6 +249,49 @@ private func applyPresetInternal(_ state: CRTBridgeState,
     applyUserOverrides(state)
 }
 
+/// DIAGNOSTIC (temporary): record the layout the engine actually chose.
+///
+/// The existing log carries the SIGNAL and the DISPLAY but not the DECISION, which left the
+/// interesting numbers — the phosphor buffer, the buffer→viewport ratio, and above all the
+/// scanline pitch as it lands ON THE GLASS — to be guessed at from screenshots. They are not
+/// guessable: a screenshot is resampled on the way to being viewed, which manufactures
+/// exactly the kind of beat we are chasing. Same file as the host's signal/display lines
+/// (a Finder-launched .app has nowhere to put stderr).
+private func logLayout(_ state: CRTBridgeState,
+                       _ l: CRTScreenLayout,
+                       _ panelScale: Float) {
+    guard let home = ProcessInfo.processInfo.environment["HOME"],
+          let f = FileHandle(forWritingAtPath: home + "/Library/Logs/86Box-crt-signal.log")
+    else { return }
+    defer { try? f.close() }
+    f.seekToEndOfFile()
+
+    let vpH = Float(l.viewport.height)
+    let vpW = Float(l.viewport.width)
+    // THE number: scanline pitch on the panel. The phosphor buffer cancels out of it
+    // (k·vpH / k·scanlines), so this is what the beat — if any — has to be explained by.
+    let displayedPitch = vpH / Float(max(1, l.scanlineCount))
+    // Buffer→viewport ratio. 1.0 = no resample; anything else resamples the comb + mask.
+    let ratio = vpH / Float(max(1, l.phosphorHeight))
+    // Displayed RGB stripe width in drawable px (what the mask actually looks like).
+    let displayedStripe = l.stripePitch * vpW / Float(max(1, l.phosphorWidth))
+
+    let line = String(
+        format: "layout -> signal %dx%d%@ | drawable %.0fx%.0f | viewport %.0fx%.0f"
+              + " | buffer %dx%d (k=%.3f) | displayedPitch %.4f px/scanline"
+              + " | buf->vp %.5f | renderW %d | beamW %.3f vis %.3f"
+              + " | stripePitch %.3f buf -> %.3f px | panelScale %.4f\n",
+        state.contentSize.x, l.scanlineCount, l.interlaced ? " INTERLACED" : "",
+        Float(state.drawableSize.width), Float(state.drawableSize.height),
+        vpW, vpH,
+        l.phosphorWidth, l.phosphorHeight,
+        Float(l.phosphorHeight) / Float(max(1, l.scanlineCount)),
+        displayedPitch, ratio, l.renderWidth,
+        l.beamWidth, l.scanlineVisibility,
+        l.stripePitch, displayedStripe, panelScale)
+    f.write(Data(line.utf8))
+}
+
 private func recomputeLayout(_ state: CRTBridgeState) {
     guard let preset = state.preset,
           state.drawableSize.width > 0, state.drawableSize.height > 0 else { return }
@@ -287,6 +330,7 @@ private func recomputeLayout(_ state: CRTBridgeState) {
 
     state.scaling.applyLayoutState(chosen)
     state.filter.apply(chosen)
+    logLayout(state, chosen, panelScale)
 
     // NOT set here any more: maskLODBias. `filter.apply(layout)` derives it from the
     // layout's render width (engine policy, MaskLOD) — the bridge was recomputing the
