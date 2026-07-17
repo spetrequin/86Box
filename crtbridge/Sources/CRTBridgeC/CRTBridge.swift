@@ -121,18 +121,19 @@ private func signalScanlines(_ preset: CRTPreset, _ contentH: Int) -> Int {
 /// refresh via crt_bridge_set_signal (mon_signal_refresh_hz), and that always wins:
 /// a card does not guess its own timing, it *is* the timing.
 ///
-/// The table below is a FALLBACK for cards that don't report yet (CGA/MDA/EGA keep
-/// their timings in their own structs and are not wired up). It is the standards
-/// approximation the bridge used to fabricate for every mode:
-///   <480 lines (CGA 200 / EGA 350 / VGA 720×400 text): 70 Hz
-///   ≥480 lines (VGA 640×480 and SVGA 600/768/1024…):   60 Hz
-/// Fixed-frequency presets (TVs) keep their own physical rate (59.94/50).
+/// When the card DOESN'T report (CGA/MDA/EGA keep their timings in their own structs and
+/// are not wired up yet), fall back to the PRESET's refresh — the CRT settings are the
+/// defaults for when there is no request from the API. This replaces a fabricated
+/// `contentH < 480 ? 70 : 60` guess: a real number the user chose beats an invented one,
+/// and it is what makes the flexible monochrome monitors honour their JSON default rate
+/// (e.g. amber's 70 Hz) instead of a resolution-based guess. Fixed-frequency presets (TVs)
+/// keep their own physical rate via the `multiSync` guard.
 private func signalRefreshHz(_ state: CRTBridgeState,
                              _ preset: CRTPreset,
                              _ contentH: Int) -> Float {
     guard preset.multiSync else { return preset.refreshRate }
     if state.signalRefreshHz > 0 { return state.signalRefreshHz }   // the card's truth
-    return contentH < 480 ? 70.0 : 60.0                             // fallback guess
+    return preset.refreshRate                                       // JSON default, not a guess
 }
 
 /// Active phosphor pattern: host override if set, else the preset's.
