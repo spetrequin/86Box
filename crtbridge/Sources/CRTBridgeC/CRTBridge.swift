@@ -173,6 +173,9 @@ private func applyUserOverrides(_ state: CRTBridgeState) {
     // explicitly overridden it via crt_bridge_set_beam_segment (kept for ABI
     // compat / diagnostics; the 86Box UI no longer exposes it).
     state.filter.parameters.beam.beamSegmentFraction = state.beamSegmentOverride ?? 0.0
+    // Emitter lattice (E5 eyeball phase): real RGB phosphors for stripe
+    // presets; the engine gate keeps shadow/slot/triode legacy.
+    state.filter.parameters.phosphor.latticeEnabled = true
     if let v = state.shutterOverride      { state.filter.parameters.display.observerShutter = v }
 }
 
@@ -712,7 +715,8 @@ public func crt_bridge_set_h_bandwidth(_ ref: UnsafeMutableRawPointer, _ v: Floa
 @_cdecl("crt_bridge_set_h_focus")
 public func crt_bridge_set_h_focus(_ ref: UnsafeMutableRawPointer, _ v: Float) {
     let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    let f = max(0.0, min(3.0, v))
+    // Bipolar focus pot: 0 = focused; both directions defocus, σ = |v|.
+    let f = min(3.0, abs(v))
     s.hFocusOverride = f
     s.filter.parameters.beam.beamHorizontalSpot = f
 }

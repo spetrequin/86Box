@@ -403,7 +403,8 @@ MetalRenderer::getOptions(QWidget *parent)
     // HIGHER = softer. Floor 0.2 keeps the anti-banding reconstruction always active.
     addSlider(form, tr("Video bandwidth (crisp ↔ soft)"), 0.2, 1.0, p->persistedValue("crt.hbandwidth", 0.5), [p](float v) { p->setHBandwidth(v); });
     // Optical horizontal defocus of the beam spot, in source pixels. 0 = focused.
-    addSlider(form, tr("H focus blur"), 0.0, 3.0, p->persistedValue("crt.hfocus", 0.0), [p](float v) { p->setHFocus(v); });
+    // Bipolar like the real focus pot: 0 = sweet spot, either direction blurs.
+    addSlider(form, tr("H focus (◄ 0 ►)"), -3.0, 3.0, p->persistedValue("crt.hfocus", 0.0), [p](float v) { p->setHFocus(v); });
     // (Beam sweep dial removed: the beam is pinned to the dot — the tube's
     // physical truth. The user-facing control is the OBSERVER:)
     // 1 = fused eye (steady), lower = camera shutter — the rolling band /
