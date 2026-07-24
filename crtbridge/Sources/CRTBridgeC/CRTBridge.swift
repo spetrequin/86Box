@@ -51,11 +51,10 @@ private final class CRTBridgeState {
     /// host (D2 — the engine sizes it from its own viewport). Non-zero only if the host
     /// explicitly pins it via crt_bridge_set_render_resolution.
     var renderWidthOverride: Int = 0
-    /// `.displayOnly` RGB mask scale — a multiplier of the engine's algorithmic
-    /// finest pitch. 1.0 (default) = finest (1px per aperture-grille stripe = 3px
-    /// triplet); 2.0/3.0 = coarser (the "1x/2x/3x" render-options control). Set via
-    /// crt_bridge_set_mask_scale; the CRT_MASK_SCALE env var seeds it. See CRTEngine
-    /// docs/RenderIntent-DisplayVsRecording.md.
+    /// `.displayOnly` RGB mask scale (Pattern Scale) — a multiplier of the tube's PHYSICAL
+    /// phosphor pitch. 1.0 (default) = the real pitch; higher coarsens the grille so it reads
+    /// at smaller window sizes. CRTEngine 1.4.0 supports 1–10×. Set via crt_bridge_set_mask_scale;
+    /// the CRT_MASK_SCALE env var seeds it. See CRTEngine docs/RenderIntent-DisplayVsRecording.md.
     var displayMaskScale: Float =
         Float(ProcessInfo.processInfo.environment["CRT_MASK_SCALE"] ?? "") ?? 1.0
     /// Host override of the preset's phosphor pattern (nil = use preset).
@@ -78,17 +77,23 @@ private final class CRTBridgeState {
     var vJitterOverride:      Float? = nil
     var shotNoiseOverride:    Float? = nil
     var signalNoiseOverride:  Float? = nil
-    /// .displayOnly HDR mask dim strength (0 = off, 1 = strong). Seeded from
-    /// CRT_HDR_MASK_DIM; how much EDR headroom fades the mask toward flat to tame the
-    /// harsh crosshatch on HDR panels.
-    var hdrMaskDim: Float =
-        Float(ProcessInfo.processInfo.environment["CRT_HDR_MASK_DIM"] ?? "") ?? 0.5
+    var hBandwidthOverride:   Float? = nil   // raised-cosine rolloff β (video bandwidth)
+    var hFocusOverride:       Float? = nil   // optical horizontal focus σ (source px)
+    var scanSmoothOverride:   Float? = nil   // scanline gap-fill strength (band-limit)
+    var patternSmoothOverride: Float? = nil  // mask anti-alias strength (band-limit margin)
+    var beamSegmentOverride:  Float? = nil   // beam temporal resolution (1 = legacy whole-line, <1 = segmented dot)
+    var shutterOverride:      Float? = nil   // observer integration (1 = fused eye, <1 = camera shutter)
     let displayEnv = DisplayEnvironment()
 
     /// The engine's display tail (band-limited scale + the drawable's transfer function).
     /// Rebuilt when the drawable's pixel format or transfer changes — e.g. the window moves
     /// to an EDR display and the host swaps the layer from bgra8Unorm to rgba16Float.
     var compositor: DisplayCompositor? = nil
+    /// Viewport-sized intermediate that the 1.4.0 display shader renders into — the RGB mask
+    /// is evaluated at OUTPUT (on-screen) resolution here, so it stays sharp at any window
+    /// size instead of being baked into the phosphor buffer and upscaled. The compositor
+    /// then places it (aspect) and applies the drawable's transfer. Resized with the viewport.
+    var displaySurface: MTLTexture? = nil
 
     init(device: MTLDevice, filter: CRTFilter, scaling: ScalingManager) {
         self.device = device
@@ -160,29 +165,30 @@ private func applyUserOverrides(_ state: CRTBridgeState) {
     if let v = state.vJitterOverride      { state.filter.parameters.aging.verticalInstability = v }
     if let v = state.shotNoiseOverride    { state.filter.parameters.beam.beamShotNoise = v }
     if let v = state.signalNoiseOverride  { state.filter.parameters.aging.signalNoise = v }
-    state.filter.parameters.display.hdrMaskDim = state.hdrMaskDim
+    if let v = state.hBandwidthOverride   { state.filter.parameters.beam.beamHorizontalRolloff = v }
+    if let v = state.hFocusOverride       { state.filter.parameters.beam.beamHorizontalSpot = v }
+    if let v = state.scanSmoothOverride   { state.filter.parameters.beam.scanlineBandLimit = v }
+    if let v = state.patternSmoothOverride { state.filter.parameters.display.maskSmoothing = v }
+    // The beam is pinned to the DOT (its physical truth) unless a host has
+    // explicitly overridden it via crt_bridge_set_beam_segment (kept for ABI
+    // compat / diagnostics; the 86Box UI no longer exposes it).
+    state.filter.parameters.beam.beamSegmentFraction = state.beamSegmentOverride ?? 0.0
+    if let v = state.shutterOverride      { state.filter.parameters.display.observerShutter = v }
 }
 
-/// Push host-display capabilities into the filter: refresh cadence and EDR
-/// brightness compensation. Mirrors Phosphors' `updateEDRCompensation` so the
-/// stripe/mask patterns aren't left dim on HDR displays.
+/// Push host-display capabilities into the filter: refresh cadence and the LIVE
+/// EDR headroom. EDR is no longer a gain — the engine's highlight shoulder gives
+/// the tube's >1.0 peaks room up to min(peakAllowance, this headroom), and moving
+/// the window to an SDR panel instantly degrades to the SDR curve.
 private func applyDisplayEnvironment(_ state: CRTBridgeState) {
     let env = state.displayEnv
     state.filter.displayRefreshRate = Float(env.info.maxRefreshRate)
+    state.filter.displayHeadroom = Float(env.edrCurrent)
 
-    let edrBoost = env.edrMultiplier
-    state.filter.parameters.display.edrBoost = edrBoost
-
-    // Mask brightness compensation is ENGINE policy — call it, don't re-derive it. The
-    // bridge used to duplicate this formula inline, which is exactly how the two drift
-    // apart: the engine's version can be fixed and the host quietly keeps the old bug.
-    // (EDRCompensation returns 1.0 for triode, whose sub-pixels are co-located and need
-    // no area compensation; edrBoost is applied separately in-shader.)
-    let pattern = state.filter.parameters.phosphor.colorPhosphorPattern
-    state.filter.parameters.display.stripeBrightnessBoost =
-        EDRCompensation.stripeBrightnessBoost(pattern: pattern,
-                                              edrBoost: edrBoost,
-                                              edrHeadroom: Float(env.edrCurrent))
+    // NOTE: stripeBrightnessBoost is no longer set here. As of CRTEngine 1.4.0 the
+    // energy-preserving mask (mask ÷ tile-mean) keeps brightness constant by construction,
+    // so the old 1/3-active-phosphor compensation is a dead no-op in the display shader
+    // (it survives only in comments there).
 }
 
 // MARK: - Internal helpers
@@ -330,7 +336,12 @@ private func recomputeLayout(_ state: CRTBridgeState) {
     }
 
     state.scaling.applyLayoutState(chosen)
-    state.filter.apply(chosen)
+    // Pattern Scale (RGB mask coarsening) rides the engine's `patternScale` argument here —
+    // it multiplies the layout's physical stripe pitch (CRTFilter+ApplyPreset), exactly as
+    // Phosphors does. (The CRTLayoutInputs.displayMaskScale field is orphaned in 1.4.0: the
+    // physical-density refactor stopped reading it, so setting it in makeInputs did nothing —
+    // which is why the slider was inert until this call started passing patternScale.)
+    state.filter.apply(chosen, patternScale: state.displayMaskScale)
     logLayout(state, chosen, panelScale)
 
     // NOT set here any more: maskLODBias. `filter.apply(layout)` derives it from the
@@ -387,8 +398,11 @@ private func makeInputs(_ state: CRTBridgeState,
         // scale = native panel px per framebuffer(backing) px (1.0 native; <1 in a scaled
         // "More Space" desktop where the OS resamples the framebuffer onto the panel).
         backingToPanelScale: panelScale,
-        // RGB mask scale (1x/2x/3x) — multiplier of the engine's algorithmic finest.
-        displayMaskScale: state.displayMaskScale
+        // Scanline anti-alias strength: the sharp half also relaxes the engine's
+        // display-domain beam-sigma floor (tight beam + raw comb, user's alias risk).
+        scanlineSmoothing: state.scanSmoothOverride ?? 1.0
+        // NOTE: displayMaskScale is NOT passed — it's orphaned in CRTEngine 1.4.0 (stored,
+        // never read). Pattern Scale is applied via filter.apply(patternScale:) in recomputeLayout.
     )
 }
 
@@ -545,10 +559,15 @@ public func crt_bridge_update_display(_ ref: UnsafeMutableRawPointer,
 
 /// The display's currently-available EDR headroom (1.0 = SDR, >1 = HDR capable).
 /// The host uses this to decide whether to put its CAMetalLayer in EDR mode.
+// Returns the panel's POTENTIAL headroom (capability): the host decides the layer
+// format from this. Using CURRENT here is the classic EDR chicken-and-egg — current
+// reads 1.0 until EDR content is on screen, so the layer never goes EDR and EDR
+// never engages. The live CURRENT headroom is what clamps the highlight ceiling,
+// re-read per frame in crt_bridge_present.
 @_cdecl("crt_bridge_edr_headroom")
 public func crt_bridge_edr_headroom(_ ref: UnsafeMutableRawPointer) -> Float {
     let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    return Float(state.displayEnv.edrCurrent)
+    return Float(state.displayEnv.edrPotential)
 }
 
 /// Set the fixed phosphor render width (px). Higher = finer stripes/mask, more
@@ -561,52 +580,29 @@ public func crt_bridge_set_render_resolution(_ ref: UnsafeMutableRawPointer,
     recomputeLayout(state)
 }
 
-/// `.displayOnly` RGB mask scale: a multiplier of the engine's algorithmic finest
-/// pitch. 1.0 = finest (1px aperture-grille stripe / 3px triplet); 2.0 / 3.0 =
-/// coarser. The "1x/2x/3x" render-options control. Clamped [1, 3].
+/// `.displayOnly` RGB mask scale (Pattern Scale): a multiplier of the engine's physical
+/// phosphor pitch. 1.0 = the tube's real pitch; higher coarsens the grille so it reads at
+/// smaller sizes (a fine VGA tube is sub-Nyquist at typical windows and needs several ×).
+/// CRTEngine 1.4.0 supports 1–10×; clamped to match.
 @_cdecl("crt_bridge_set_mask_scale")
 public func crt_bridge_set_mask_scale(_ ref: UnsafeMutableRawPointer, _ scale: Float) {
     let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    state.displayMaskScale = max(1.0, min(3.0, scale))
+    state.displayMaskScale = max(1.0, min(10.0, scale))
     recomputeLayout(state)
-}
-
-/// HDR mask softening (0 = off … 1 = strong): how much the mask fades toward flat as
-/// EDR headroom rises, taming the harsh high-contrast crosshatch on HDR panels.
-/// `.displayOnly` only; no effect on SDR displays (edrBoost ~1).
-@_cdecl("crt_bridge_set_hdr_mask_dim")
-public func crt_bridge_set_hdr_mask_dim(_ ref: UnsafeMutableRawPointer, _ amount: Float) {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    state.hdrMaskDim = max(0.0, min(1.0, amount))
-    state.filter.parameters.display.hdrMaskDim = state.hdrMaskDim   // display param — takes next frame
 }
 
 /// Turn HDR (EDR peak-brightness boost) on/off. On → auto (use the display's EDR
 /// headroom); off → clamp to SDR. The mask-dim above still governs how the mask
 /// reacts while HDR is on.
-@_cdecl("crt_bridge_set_hdr_enabled")
-public func crt_bridge_set_hdr_enabled(_ ref: UnsafeMutableRawPointer, _ enabled: Bool) {
+/// Peak highlights (replaces the old HDR on/off + boost): how far the tube's
+/// >1.0 peaks (mask sparkle, small-area highlights) may render above reference
+/// white [1.0 … 3.0]. 1.0 = SDR look on every panel. Always capped by the LIVE
+/// panel headroom in the engine's highlight shoulder — the picture body (≤0.85×
+/// reference) is identity on every panel, so this can never blow out the image.
+@_cdecl("crt_bridge_set_peak_highlights")
+public func crt_bridge_set_peak_highlights(_ ref: UnsafeMutableRawPointer, _ v: Float) {
     let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    state.displayEnv.edrMode = enabled ? .auto : .off
-    applyDisplayEnvironment(state)
-}
-
-/// HDR/EDR boost as a continuous user control (1.0 = none … 3.0 = maximum), replacing the
-/// old on/off toggle: 1.0 IS "off", so one control covers the whole range and the user can
-/// dial how much of the panel's headroom the phosphors spend.
-///
-/// Engine policy, not host policy — CRTEngine owns the EDR response; the bridge only
-/// reports the display and passes on what the user asked for. `.forceOn` here means "use
-/// this boost", not "pretend the display has headroom": the mask compensation is still
-/// clamped by the panel's ACTUAL headroom inside the engine, so asking for 3.0 on a display
-/// that cannot deliver it does not blow the picture out.
-@_cdecl("crt_bridge_set_hdr_boost")
-public func crt_bridge_set_hdr_boost(_ ref: UnsafeMutableRawPointer, _ boost: Float) {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    let v = max(1.0, min(3.0, boost))
-    state.displayEnv.edrMode = .forceOn
-    state.displayEnv.manualEDRBoost = v
-    applyDisplayEnvironment(state)
+    state.filter.parameters.display.peakAllowance = max(1.0, min(16.0, v))
 }
 
 // MARK: - C ABI: picture + phosphor pattern + monitor conditions
@@ -636,7 +632,8 @@ public func crt_bridge_set_phosphor_pattern(_ ref: UnsafeMutableRawPointer, _ pa
     recomputeLayout(state)
     let p = effectivePattern(state)
     state.filter.parameters.display.chromaNotchStrength = (p == 1 || p == 3) ? 1.0 : 0.0
-    applyDisplayEnvironment(state)   // stripeBrightnessBoost depends on pattern
+    // (No applyDisplayEnvironment here: refresh/EDR don't depend on pattern, and the old
+    // pattern-dependent stripeBrightnessBoost it used to refresh is gone as of 1.4.0.)
 }
 
 /// RGB convergence error, bipolar [-10, 10]: 0 = perfectly aligned, sign chooses
@@ -696,6 +693,80 @@ public func crt_bridge_set_shot_noise(_ ref: UnsafeMutableRawPointer, _ v: Float
     let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
     s.shotNoiseOverride = v
     s.filter.parameters.beam.beamShotNoise = v
+}
+
+/// Horizontal video bandwidth — the raised-cosine reconstruction rolloff β
+/// [0.2 … 1.0]. Lower = wider flat passband = sharper; higher = softer rolloff.
+/// (Clamped ≥ 0.2 so the anti-banding reconstruction can't be disabled from here.)
+@_cdecl("crt_bridge_set_h_bandwidth")
+public func crt_bridge_set_h_bandwidth(_ ref: UnsafeMutableRawPointer, _ v: Float) {
+    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
+    let b = max(0.2, min(1.0, v))
+    s.hBandwidthOverride = b
+    s.filter.parameters.beam.beamHorizontalRolloff = b
+}
+
+/// Horizontal optical focus blur σ in source pixels [0 … 2]. 0 = perfectly
+/// focused (default); higher = defocused beam. Purely aesthetic — the anti-banding
+/// reconstruction above is independent of this.
+@_cdecl("crt_bridge_set_h_focus")
+public func crt_bridge_set_h_focus(_ ref: UnsafeMutableRawPointer, _ v: Float) {
+    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
+    let f = max(0.0, min(3.0, v))
+    s.hFocusOverride = f
+    s.filter.parameters.beam.beamHorizontalSpot = f
+}
+
+/// Beam temporal resolution [0 … 1] — SIMULATION control, not a shader dial.
+/// 1 = the whole scanline is excited at one instant (legacy engine, bit-exact,
+/// zero flicker). Below 1 the beam becomes a segmented dot covering that
+/// fraction of the line: cells get real per-segment excitation times, decay
+/// from their own age, and the display integrates emission over the frame
+/// (exposure model) — flicker/shimmer emerge physically as the dial approaches
+/// a dot. 0 maps to the engine's shortest segment (1/1024 of a line).
+@_cdecl("crt_bridge_set_beam_segment")
+public func crt_bridge_set_beam_segment(_ ref: UnsafeMutableRawPointer, _ v: Float) {
+    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
+    // The user dial lives entirely in the new beam simulation: 1.00 = the new
+    // physics fully fused, not the legacy engine (exact 1.0 stays an internal
+    // identity-harness anchor), so the top maps just below it.
+    let f = max(0.0, min(0.9995, v))
+    s.beamSegmentOverride = f
+    s.filter.parameters.beam.beamSegmentFraction = f
+}
+
+/// OBSERVER dial ("Shutter") [0 … 1]: how the viewer integrates the tube's
+/// pulsing emission. 1 = fully fused (rested eye — steady); lower = an
+/// ever-faster camera shutter — rolling band and flicker, the filmed-CRT look.
+@_cdecl("crt_bridge_set_shutter")
+public func crt_bridge_set_shutter(_ ref: UnsafeMutableRawPointer, _ v: Float) {
+    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
+    let f = max(0.0, min(1.0, v))
+    s.shutterOverride = f
+    s.filter.parameters.display.observerShutter = f
+}
+
+/// Scanline smoothing [0 … 1]: fills the scanline gaps when the output can't
+/// resolve them (< ~3 px/scanline — small windows, low-res recordings), trading
+/// gap depth for freedom from shimmer/aliasing. 0 = sharp gaps everywhere.
+@_cdecl("crt_bridge_set_scanline_smoothing")
+public func crt_bridge_set_scanline_smoothing(_ ref: UnsafeMutableRawPointer, _ v: Float) {
+    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
+    let f = max(0.0, min(1.0, v))
+    s.scanSmoothOverride = f
+    s.filter.parameters.beam.scanlineBandLimit = f
+    recomputeLayout(s)   // the sharp half also relaxes the beam-sigma floor (layout-derived)
+}
+
+/// Pattern smoothing [0 … 1]: mask anti-alias strength at the chosen Pattern Scale.
+/// 1 = full band-limit margin (clean), 0.5 = pre-margin ramp, 0 = raw pattern
+/// (maximum grille detail, moiré is the user's choice).
+@_cdecl("crt_bridge_set_pattern_smooth")
+public func crt_bridge_set_pattern_smooth(_ ref: UnsafeMutableRawPointer, _ v: Float) {
+    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
+    let f = max(0.0, min(2.0, v))
+    s.patternSmoothOverride = f
+    s.filter.parameters.display.maskSmoothing = f
 }
 
 /// Additive signal noise / snow (0 … ~0.15).
@@ -784,12 +855,45 @@ public func crt_bridge_present(_ ref: UnsafeMutableRawPointer,
             return false
         }
     }
-    guard let compositor = state.compositor,
-          let out = state.filter.render(inputTexture: input, time: time, commandBuffer: cmd) else {
+    guard let compositor = state.compositor else { return false }
+
+    // Run the phosphor simulation for this frame. Its phosphor-buffer display output is
+    // unused — we re-render the display at OUTPUT resolution below (the CRTEngine 1.4.0
+    // surface-mask path), so the RGB mask is evaluated at on-screen pixels and stays sharp
+    // at any window size instead of being baked into the phosphor buffer and upscaled.
+    _ = state.filter.render(inputTexture: input, time: time, commandBuffer: cmd)
+
+    // (Re)allocate the viewport-sized display surface, then render the mask + display tail
+    // into it at that resolution.
+    let vp = state.scaling.viewport
+    let vw = Int(vp.width.rounded()), vh = Int(vp.height.rounded())
+    guard vw > 1, vh > 1 else { return false }
+    if state.displaySurface == nil
+        || state.displaySurface?.width != vw
+        || state.displaySurface?.height != vh {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float, width: vw, height: vh, mipmapped: false)
+        desc.usage = [.renderTarget, .shaderRead]
+        desc.storageMode = .private
+        state.displaySurface = state.device.makeTexture(descriptor: desc)
+        state.displaySurface?.label = "CRTBridge_DisplaySurface"
+    }
+    // Display-pass highlight ceiling: peaks get the panel's LIVE headroom up to
+    // the user's allowance; on an SDR panel this is exactly the SDR curve.
+    // Re-read the headroom every frame — it's live state (rises when the system
+    // engages EDR for our layer, moves with display brightness).
+    state.displayEnv.refreshEDR()
+    let ceiling = min(max(1.0, state.filter.parameters.display.peakAllowance),
+                      max(1.0, Float(state.displayEnv.edrCurrent)))
+    guard let surface = state.displaySurface,
+          state.filter.renderDisplay(to: surface, commandBuffer: cmd,
+                                     highlightCeiling: ceiling) != nil else {
         return false
     }
 
-    compositor.composite(crtOutput: out,
+    // The compositor now runs 1:1 (surface is already viewport-sized): it just places the
+    // picture with the engine's aspect-preserving viewport and applies the drawable's transfer.
+    compositor.composite(crtOutput: surface,
                          to: target,
                          viewport: state.scaling.viewport,
                          commandBuffer: cmd)

@@ -68,10 +68,14 @@ public:
     void setVJitter(float v);
     void setShotNoise(float v);
     void setSignalNoise(float v);
+    void setHBandwidth(float v);            /* RC rolloff β 0.2..1.0 (lower = sharper) */
+    void setHFocus(float v);                /* optical H blur σ 0..3 source px */
+    void setBeamSegment(float v);           /* beam temporal resolution 0..1 (1 = whole line, <1 = segmented dot) */
+    void setShutter(float v);               /* observer integration 0..1 (1 = fused eye, <1 = camera shutter) */
+    void setScanlineSmoothing(float v);     /* 0..1 scanline gap-fill (band-limit) */
+    void setPatternSmooth(float v);         /* 0..1 mask anti-alias at chosen Pattern Scale */
     void setMaskScale(float v);             /* RGB mask 1x/2x/3x (multiplier of finest) */
-    void setHdrMaskDim(float v);            /* 0..1 mask softening under HDR */
-    void setHdrEnabled(bool v);             /* HDR (EDR boost) on/off — superseded by setHdrBoost */
-    void setHdrBoost(float v);              /* HDR/EDR boost 1.0 (none) .. 3.0 (max) */
+    void setPeakHighlights(float v);        /* tube peak headroom 1.0 (SDR look) .. 3.0, capped by live panel headroom */
     void setPreset(int idx);                /* CRT preset by index (see kCrtPresetNames) */
 
     /* Persistence (NSUserDefaults). loadSettings() applies any saved user

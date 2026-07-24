@@ -65,11 +65,14 @@ void crt_bridge_set_display_refresh(CRTBridgeRef ref, float hz);
 
 // Detect host display capabilities (EDR headroom, refresh, scale) from an
 // NSScreen* (or NULL for the main screen) and push them into the engine. Call
-// at init and on screen changes. Sets edrBoost + stripe brightness compensation.
+// at init and on screen changes. Feeds the engine's LIVE headroom (peak ceiling).
 void crt_bridge_update_display(CRTBridgeRef ref, void *nsScreen);
 
-// The display's currently-available EDR headroom (1.0 = SDR, >1 = HDR). The host
-// uses this to decide whether to put its CAMetalLayer in EDR (rgba16Float) mode.
+// The display's POTENTIAL EDR headroom (capability; 1.0 = SDR-only panel). The host
+// decides the CAMetalLayer format from this (rgba16Float + extended linear when >1).
+// NOT the live current headroom — that clamps the highlight ceiling internally,
+// re-read every frame (current reads 1.0 until EDR content is on screen, so gating
+// the layer on it would keep EDR permanently off — the chicken-and-egg).
 float crt_bridge_edr_headroom(CRTBridgeRef ref);
 
 // Set the fixed phosphor render width (px); higher = finer stripes/mask, more
@@ -81,18 +84,11 @@ void crt_bridge_set_render_resolution(CRTBridgeRef ref, int width);
 // = 3px triplet); 2.0 / 3.0 = coarser. Clamped [1,3]. Seeded from CRT_MASK_SCALE.
 void crt_bridge_set_mask_scale(CRTBridgeRef ref, float scale);
 
-// HDR mask softening [0..1]: how much the mask fades toward flat as EDR headroom
-// rises, taming the harsh crosshatch on HDR panels. Display-only; no effect on SDR.
-void crt_bridge_set_hdr_mask_dim(CRTBridgeRef ref, float amount);
-
-// Turn HDR (EDR peak-brightness boost) on/off. On = use the display's EDR headroom;
-// off = clamp to SDR.
-void crt_bridge_set_hdr_enabled(CRTBridgeRef ref, bool enabled);
-
-// HDR/EDR boost as a continuous control: 1.0 = none (i.e. "off"), 3.0 = maximum. One
-// slider instead of a toggle. The engine still clamps the mask compensation by the
-// display's ACTUAL headroom, so asking for more than the panel has cannot blow it out.
-void crt_bridge_set_hdr_boost(CRTBridgeRef ref, float boost);   // 1.0 .. 3.0
+// Peak highlights (replaces HDR on/off + boost): how far the tube's >1.0 peaks
+// (mask sparkle, small-area highlights) may render above reference white. Always
+// capped by the panel's LIVE headroom; the picture body is identity on every
+// panel, so this can never blow out the image. 1.0 = SDR look everywhere.
+void crt_bridge_set_peak_highlights(CRTBridgeRef ref, float v);   // 1.0 .. 16.0 (live-clamped by panel)
 
 // Switch CRT preset at runtime (at the current content size, keeping user overrides).
 // e.g. "VGA monitor", "NTSC color", "Green CRT monitor". Returns false if unknown.
@@ -112,6 +108,12 @@ void crt_bridge_set_convergence(CRTBridgeRef ref, float v);       // px, 0..~1
 void crt_bridge_set_h_jitter(CRTBridgeRef ref, float v);          // px, 0..~3
 void crt_bridge_set_v_jitter(CRTBridgeRef ref, float v);          // scanlines, 0..~2
 void crt_bridge_set_shot_noise(CRTBridgeRef ref, float v);        // 0..~0.05
+void crt_bridge_set_h_bandwidth(CRTBridgeRef ref, float v);       // RC rolloff β 0.2..1.0 (lower = sharper)
+void crt_bridge_set_h_focus(CRTBridgeRef ref, float v);           // optical H blur σ 0..3 source px (0 = focused)
+void crt_bridge_set_beam_segment(CRTBridgeRef ref, float v);      // beam temporal resolution 0..1: 1 = whole line at one instant (legacy, zero flicker), smaller = segmented dot (real sweep-time structure, flicker as the dial approaches a dot)
+void crt_bridge_set_shutter(CRTBridgeRef ref, float v);          // observer integration 0..1: 1 = fused eye (steady), lower = camera shutter (rolling band / flicker)
+void crt_bridge_set_scanline_smoothing(CRTBridgeRef ref, float v); // 0..1 gap-fill when output can't resolve scanlines
+void crt_bridge_set_pattern_smooth(CRTBridgeRef ref, float v);     // 0..2 mask anti-alias (1 = clean default, 2 = pattern dissolved)
 void crt_bridge_set_signal_noise(CRTBridgeRef ref, float v);      // 0..~0.15
 
 // Lay the screen out for a given drawable size (the on-screen widget size).

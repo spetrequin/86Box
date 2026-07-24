@@ -582,10 +582,14 @@ void MetalPresenter::setHJitter(float v)        { CRT_SET(crt_bridge_set_h_jitte
 void MetalPresenter::setVJitter(float v)        { CRT_SET(crt_bridge_set_v_jitter(impl->crt, v),         "crt.vjitter", v); }
 void MetalPresenter::setShotNoise(float v)      { CRT_SET(crt_bridge_set_shot_noise(impl->crt, v),       "crt.shotnoise", v); }
 void MetalPresenter::setSignalNoise(float v)    { CRT_SET(crt_bridge_set_signal_noise(impl->crt, v),     "crt.signalnoise", v); }
+void MetalPresenter::setHBandwidth(float v)     { CRT_SET(crt_bridge_set_h_bandwidth(impl->crt, v),      "crt.hbandwidth", v); }
+void MetalPresenter::setHFocus(float v)         { CRT_SET(crt_bridge_set_h_focus(impl->crt, v),          "crt.hfocus", v); }
+void MetalPresenter::setBeamSegment(float v)    { CRT_SET(crt_bridge_set_beam_segment(impl->crt, v),     "crt.beamseg", v); }
+void MetalPresenter::setShutter(float v)        { CRT_SET(crt_bridge_set_shutter(impl->crt, v),          "crt.shutter", v); }
+void MetalPresenter::setScanlineSmoothing(float v) { CRT_SET(crt_bridge_set_scanline_smoothing(impl->crt, v), "crt.scansmooth", v); }
+void MetalPresenter::setPatternSmooth(float v)  { CRT_SET(crt_bridge_set_pattern_smooth(impl->crt, v),   "crt.patsmooth", v); }
 void MetalPresenter::setMaskScale(float v)      { CRT_SET(crt_bridge_set_mask_scale(impl->crt, v),       "crt.maskscale", v); }
-void MetalPresenter::setHdrMaskDim(float v)     { CRT_SET(crt_bridge_set_hdr_mask_dim(impl->crt, v),     "crt.hdrmaskdim", v); }
-void MetalPresenter::setHdrEnabled(bool v)      { CRT_SET(crt_bridge_set_hdr_enabled(impl->crt, v),      "crt.hdrenabled", v ? 1.0f : 0.0f); }
-void MetalPresenter::setHdrBoost(float v)       { CRT_SET(crt_bridge_set_hdr_boost(impl->crt, v),        "crt.hdrboost", v); }
+void MetalPresenter::setPeakHighlights(float v) { CRT_SET(crt_bridge_set_peak_highlights(impl->crt, v),  "crt.peaks", v); }
 void MetalPresenter::setPreset(int idx)         { if (idx < 0 || idx >= 6) return; CRT_SET(crt_bridge_set_preset(impl->crt, kCrtPresetNames[idx]), "crt.preset", idx); }
 
 #undef CRT_SET
@@ -634,12 +638,15 @@ MetalPresenter::loadSettings()
     if (has("crt.vjitter"))      crt_bridge_set_v_jitter(impl->crt, fv("crt.vjitter"));
     if (has("crt.shotnoise"))    crt_bridge_set_shot_noise(impl->crt, fv("crt.shotnoise"));
     if (has("crt.signalnoise"))  crt_bridge_set_signal_noise(impl->crt, fv("crt.signalnoise"));
+    if (has("crt.hbandwidth"))   crt_bridge_set_h_bandwidth(impl->crt, fv("crt.hbandwidth"));
+    if (has("crt.hfocus"))       crt_bridge_set_h_focus(impl->crt, fv("crt.hfocus"));
+    if (has("crt.shutter"))      crt_bridge_set_shutter(impl->crt, fv("crt.shutter"));
+    if (has("crt.scansmooth"))   crt_bridge_set_scanline_smoothing(impl->crt, fv("crt.scansmooth"));
+    if (has("crt.patsmooth"))    crt_bridge_set_pattern_smooth(impl->crt, fv("crt.patsmooth"));
     if (has("crt.maskscale"))    crt_bridge_set_mask_scale(impl->crt, fv("crt.maskscale"));
-    if (has("crt.hdrmaskdim"))   crt_bridge_set_hdr_mask_dim(impl->crt, fv("crt.hdrmaskdim"));
-    // hdrboost supersedes the old on/off toggle (1.0 = off). Apply the legacy key first so
-    // a user who had HDR switched off keeps that, then let an explicit boost override it.
-    if (has("crt.hdrenabled"))   crt_bridge_set_hdr_enabled(impl->crt, fv("crt.hdrenabled") != 0.0f);
-    if (has("crt.hdrboost"))     crt_bridge_set_hdr_boost(impl->crt, fv("crt.hdrboost"));
+    // Peak highlights (the old crt.hdrenabled/hdrboost keys are retired — EDR is no
+    // longer a gain, so their values have no meaning under the new curve).
+    if (has("crt.peaks"))        crt_bridge_set_peak_highlights(impl->crt, fv("crt.peaks"));
 #endif
 }
 

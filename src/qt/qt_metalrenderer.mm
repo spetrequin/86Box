@@ -156,9 +156,10 @@ logDisplay(NSScreen *s, double scale)
     if (f == nullptr)
         return;
     const NSRect fr = s.frame;
-    fprintf(f, "display -> \"%s\" %.0fx%.0f pts @%.1fx  EDR %.2f\n",
+    fprintf(f, "display -> \"%s\" %.0fx%.0f pts @%.1fx  EDR now %.2f / potential %.2f\n",
             s.localizedName.UTF8String, fr.size.width, fr.size.height, scale,
-            s.maximumExtendedDynamicRangeColorComponentValue);
+            s.maximumExtendedDynamicRangeColorComponentValue,
+            s.maximumPotentialExtendedDynamicRangeColorComponentValue);
     fclose(f);
 }
 
@@ -372,14 +373,13 @@ MetalRenderer::getOptions(QWidget *parent)
     addSlider(form, tr("Contrast"),    0.1, 3.0, p->persistedValue("crt.contrast", 1.5),    [p](float v) { p->setContrast(v); });
 
     addSection(form, tr("HDR"));
-    // One control instead of a toggle: 1.0 IS "off", so the user dials how much of the
-    // panel's headroom the phosphors spend rather than flipping between none and a fixed
-    // amount. The engine clamps this by the display's real headroom, so a high setting on
-    // a display that can't deliver it won't blow the picture out.
-    addSlider(form, tr("HDR boost"), 1.0, 3.0, p->persistedValue("crt.hdrboost", 1.6), [p](float v) { p->setHdrBoost(v); });
-    // Softens the phosphor mask as EDR headroom rises, so it doesn't read as a harsh
-    // crosshatch on HDR panels. 0 = crisp (may be harsh), 1 = strongly softened.
-    addSlider(form, tr("Mask softening"), 0.0, 1.0, p->persistedValue("crt.hdrmaskdim", 0.5), [p](float v) { p->setHdrMaskDim(v); });
+    // EDR is headroom for the tube's PEAKS, not a picture gain: the picture body is
+    // identity on every panel; only >reference-white content (mask sparkle, highlights)
+    // rises into the panel's measured headroom, capped by this allowance. 1.0 = SDR look.
+    addSlider(form, tr("Peak highlights (SDR ↔ full)"), 1.0, 8.0, p->persistedValue("crt.peaks", 2.5), [p](float v) { p->setPeakHighlights(v); });
+    // (No "Mask softening" control: as of CRTEngine 1.4.0 the display shader's automatic
+    // Nyquist band-limit flattens the mask on its own when it can't be resolved, so the
+    // manual HDR mask-dim was redundant.)
 
     addSection(form, tr("Phosphor"));
     auto *pattern = new QComboBox();
@@ -390,17 +390,28 @@ MetalRenderer::getOptions(QWidget *parent)
                      [p](int idx) { p->setPhosphorPattern(idx); });
     form->addRow(tr("Pattern"), pattern);
 
-    // RGB mask scale — 1× is the algorithmic finest (1 panel px per stripe); 2×/3×
-    // coarsen it. Maps to the engine's displayMaskScale multiplier.
-    auto *rgbScale = new QComboBox();
-    rgbScale->addItems({ tr("1× (finest)"), tr("2×"), tr("3×") });
-    rgbScale->setCurrentIndex(std::clamp(int(std::lround(p->persistedValue("crt.maskscale", 1.0))) - 1, 0, 2));
-    QObject::connect(rgbScale, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                     [p](int idx) { p->setMaskScale(float(idx + 1)); });
-    form->addRow(tr("RGB scale"), rgbScale);
+    // RGB mask scale (Pattern Scale) — 1× is the tube's real physical phosphor pitch; higher
+    // coarsens the grille so it reads at smaller window sizes (a fine VGA tube is sub-Nyquist
+    // at typical sizes and needs several ×). CRTEngine 1.4.0 supports 1–10×.
+    addSlider(form, tr("RGB scale (1–10×)"), 1.0, 10.0, p->persistedValue("crt.maskscale", 1.0), [p](float v) { p->setMaskScale(v); });
+
 
     addSection(form, tr("Beam"));
     addSlider(form, tr("Sharpness (soft ↔ sharp)"), 0.0, 1.0, p->persistedValue("crt.sharpness", 0.5), [p](float v) { p->setSharpness(v); });
+    // Video bandwidth: the analog-chain reconstruction rolloff β. LOWER = wider flat
+    // passband = crisper horizontal detail (with a touch of authentic edge ringing);
+    // HIGHER = softer. Floor 0.2 keeps the anti-banding reconstruction always active.
+    addSlider(form, tr("Video bandwidth (crisp ↔ soft)"), 0.2, 1.0, p->persistedValue("crt.hbandwidth", 0.5), [p](float v) { p->setHBandwidth(v); });
+    // Optical horizontal defocus of the beam spot, in source pixels. 0 = focused.
+    addSlider(form, tr("H focus blur"), 0.0, 3.0, p->persistedValue("crt.hfocus", 0.0), [p](float v) { p->setHFocus(v); });
+    // (Beam sweep dial removed: the beam is pinned to the dot — the tube's
+    // physical truth. The user-facing control is the OBSERVER:)
+    // 1 = fused eye (steady), lower = camera shutter — the rolling band /
+    // flicker of filmed CRT footage.
+    addSlider(form, tr("Shutter (camera ↔ eye)"), 0.0, 1.0, p->persistedValue("crt.shutter", 1.0), [p](float v) { p->setShutter(v); });
+    // (Scanline smoothing + Pattern smoothing sliders removed: they dialed
+    // display-shader anti-alias parameters, not tube physics — simulation-first
+    // cleanup. Engine defaults stay active internally.)
     addSlider(form, tr("Edge focus loss"),      0.0, 1.0,  p->persistedValue("crt.edge", 0.21),  [p](float v) { p->setEdgeFocus(v); });
     addSlider(form, tr("Bloom"),                0.0, 0.5,  p->persistedValue("crt.bloom", 0.0),  [p](float v) { p->setBloom(v); });
     addSlider(form, tr("Convergence (◄ 0 ►)"), -10.0, 10.0, p->persistedValue("crt.convergence", 0.0), [p](float v) { p->setConvergence(v); });
