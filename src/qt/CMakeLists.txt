@@ -416,7 +416,15 @@ if (APPLE)
     # resource bundle; we compile CRTEngine's shaders into that bundle (reading the
     # engine read-only) so the bridge loads them via Bundle.module. Configure the
     # engine location with -DCRTENGINE_DIR=/path/to/CRTEngine.
-    set(CRTENGINE_DIR "$ENV{HOME}/Projects/Code/Swift/CRTEngine" CACHE PATH "CRTEngine Swift package root")
+    # Default to the sibling-checkout layout Package.swift also falls back to
+    # (…/Code/Swift/CRTEngine alongside …/Code/C/86Box), expressed relative to the
+    # 86Box tree so no developer's home path is baked in. Resolved to an absolute
+    # path here on purpose: this value is handed to build.sh, which runs with
+    # crtbridge/ as its working directory, so a relative path would resolve against
+    # a different base there and silently select the wrong engine.
+    get_filename_component(CRTENGINE_DIR_DEFAULT
+                           "${CMAKE_SOURCE_DIR}/../../Swift/CRTEngine" ABSOLUTE)
+    set(CRTENGINE_DIR "${CRTENGINE_DIR_DEFAULT}" CACHE PATH "CRTEngine Swift package root")
     set(CRTBRIDGE_DIR "${CMAKE_SOURCE_DIR}/crtbridge")
     if(EXISTS "${CRTBRIDGE_DIR}/Package.swift" AND EXISTS "${CRTENGINE_DIR}/Package.swift")
         set(CRTBRIDGE_DYLIB    "${CRTBRIDGE_DIR}/.build/release/libCRTBridgeC.dylib")
