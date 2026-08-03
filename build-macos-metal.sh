@@ -1,7 +1,10 @@
 #!/bin/bash
 # Configure + build 86Box on macOS (Apple Silicon) against Homebrew Qt6,
 # with the native Metal CRT renderer (RENDERER_METAL) compiled in.
-# Stub stage: presents the framebuffer straight (no CRTEngine yet).
+# The renderer drives CRTEngine via crtbridge/ (built by crtbridge/build.sh as
+# part of the CMake build). Confirm it engaged: the renderer logs CRT=on at
+# init on stderr; CRT=stub means the bridge did not load and you are seeing the
+# raw framebuffer.
 set -euo pipefail
 cd "$(dirname "$0")"
 
