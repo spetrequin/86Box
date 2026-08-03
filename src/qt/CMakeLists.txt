@@ -422,17 +422,24 @@ if (APPLE)
         set(CRTBRIDGE_DYLIB    "${CRTBRIDGE_DIR}/.build/release/libCRTBridgeC.dylib")
         set(CRTENGINE_BUNDLE   "${CRTBRIDGE_DIR}/.build/release/CRTEngine_CRTEngine.bundle")
 
-        # Build the bridge (CRTENGINE_DIR is how Package.swift finds the engine),
-        # then compile CRTEngine's Metal shaders INTO the built resource bundle so
-        # Bundle.module can load them. swift build is incremental (fast no-op).
+        # Build the bridge against WHATEVER CRTEngine is checked out at CRTENGINE_DIR
+        # — no version pin. 86Box is a diagnostic host that deliberately tracks the
+        # engine tip; if the engine is broken the build breaks LOUDLY (build.sh runs
+        # set -e), which is what we want here, not a silent runtime fallback.
+        #
+        # ONE script produces BOTH the dylib (which statically links the engine's
+        # Swift) AND the metallib (the engine's compiled shaders) from the same
+        # engine revision, so they can never desync. They used to be two steps here;
+        # a partial rebuild (swift build alone) once refreshed the dylib and left the
+        # metallib stale, and Swift vs GPU then disagreed on the CRTUniforms layout —
+        # the engine failed and 86Box dropped to its raw-feed fallback. Never build
+        # them apart: crtbridge/build.sh is the only supported way to build the bridge.
         add_custom_target(crtbridge
             COMMAND ${CMAKE_COMMAND} -E env CRTENGINE_DIR=${CRTENGINE_DIR}
-                    swift build -c release --product CRTBridgeC
-            COMMAND ${CRTBRIDGE_DIR}/build-metallib.sh
-                    ${CRTENGINE_DIR} ${CRTENGINE_BUNDLE}/default.metallib
+                    ${CRTBRIDGE_DIR}/build.sh
             WORKING_DIRECTORY ${CRTBRIDGE_DIR}
-            BYPRODUCTS ${CRTBRIDGE_DYLIB}
-            COMMENT "Building CRTBridge (Swift) + CRTEngine shader metallib"
+            BYPRODUCTS ${CRTBRIDGE_DYLIB} ${CRTENGINE_BUNDLE}/default.metallib
+            COMMENT "Building CRTBridge (dylib + CRTEngine shader metallib) against ${CRTENGINE_DIR}"
             USES_TERMINAL)
         add_dependencies(ui crtbridge)
 
@@ -458,7 +465,10 @@ if (APPLE)
                     "${_crt_res}/CRTEngine_CRTEngine.bundle"
             COMMENT "Bundling CRTBridge dylib + CRTEngine resource bundle into 86Box.app"
             VERBATIM)
-        add_dependencies(crtbundle 86Box)
+        # Depend on crtbridge as well as 86Box: the copy must never run before the
+        # dylib+metallib are (re)built, so the .app can't be assembled with a stale
+        # pair. (86Box already runs after crtbridge via ui, but state it directly.)
+        add_dependencies(crtbundle 86Box crtbridge)
         message(STATUS "CRTBridge enabled (bridge=${CRTBRIDGE_DIR}, engine=${CRTENGINE_DIR})")
     else()
         message(STATUS "CRTBridge/CRTEngine not found; Metal renderer builds as stub (no CRT sim)")
