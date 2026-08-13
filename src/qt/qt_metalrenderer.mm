@@ -399,9 +399,11 @@ MetalRenderer::getOptions(QWidget *parent)
     addSection(form, tr("Beam"));
     addSlider(form, tr("Sharpness (soft ↔ sharp)"), 0.0, 1.0, p->persistedValue("crt.sharpness", 0.5), [p](float v) { p->setSharpness(v); });
     // Video bandwidth: the analog-chain reconstruction rolloff β. LOWER = wider flat
-    // passband = crisper horizontal detail (with a touch of authentic edge ringing);
-    // HIGHER = softer. Floor 0.2 keeps the anti-banding reconstruction always active.
-    addSlider(form, tr("Video bandwidth (crisp ↔ soft)"), 0.2, 1.0, p->persistedValue("crt.hbandwidth", 0.5), [p](float v) { p->setHBandwidth(v); });
+    // passband = crisper horizontal detail (with more sinc-ringing on hard edges);
+    // HIGHER = softer, less ringing. 0 drops the reconstruction entirely for a
+    // ringless (but resample-beat-unprotected) pristine-VGA look — the anti-banding
+    // reconstruction is no longer forced always-on; it's the user's trade-off.
+    addSlider(form, tr("Video bandwidth (crisp ↔ soft)"), 0.0, 1.0, p->persistedValue("crt.hbandwidth", 0.5), [p](float v) { p->setHBandwidth(v); });
     // Optical horizontal defocus of the beam spot, in source pixels. 0 = focused.
     // Bipolar like the real focus pot: 0 = sweet spot, either direction blurs.
     addSlider(form, tr("H focus (◄ 0 ►)"), -3.0, 3.0, p->persistedValue("crt.hfocus", 0.0), [p](float v) { p->setHFocus(v); });

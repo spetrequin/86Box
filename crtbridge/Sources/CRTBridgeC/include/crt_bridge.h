@@ -7,11 +7,12 @@
 // `id<MTL...>` passed with `(__bridge void *)`, on the Swift side they are
 // recovered via Unmanaged.
 //
-// Two creation/preset families:
-//   * crt_bridge_create / _apply_preset       — load resources via Bundle.module
-//                                                (SwiftPM/Xcode hosts).
-//   * crt_bridge_create2 / _apply_preset_file  — load metallib + presets from
-//                                                explicit paths (CMake/.app hosts).
+// One creation/preset family, loading resources via Bundle.module:
+// crt_bridge_create / crt_bridge_apply_preset / crt_bridge_set_preset. 86Box's
+// CMake build (crtbridge/CMakeLists.txt + build.sh) bundles CRTEngine's resource
+// bundle (with a compiled default.metallib) straight into the .app so this path
+// works unmodified for a CMake/.app host too — there is no separate
+// explicit-path loading entry point.
 #ifndef CRT_BRIDGE_H
 #define CRT_BRIDGE_H
 
@@ -76,12 +77,15 @@ void crt_bridge_update_display(CRTBridgeRef ref, void *nsScreen);
 float crt_bridge_edr_headroom(CRTBridgeRef ref);
 
 // Set the fixed phosphor render width (px); higher = finer stripes/mask, more
-// GPU. 0 = render at the window size. Default 2880.
+// GPU. 0 (default; not currently called by 86Box) = the engine picks per its
+// own D2 policy — content width clamped to [1440, 5760]
+// (ScalingManager.autoDisplayRenderWidth), not a fixed number.
 void crt_bridge_set_render_resolution(CRTBridgeRef ref, int width);
 
-// Display-only RGB mask scale (the "1x/2x/3x" control): a multiplier of the
-// engine's algorithmic finest pitch. 1.0 = finest (1px per aperture-grille stripe
-// = 3px triplet); 2.0 / 3.0 = coarser. Clamped [1,3]. Seeded from CRT_MASK_SCALE.
+// Pattern Scale: a multiplier of the tube's PHYSICAL phosphor pitch (tube size ×
+// phosphorPitchMM from the preset — NOT a panel-PPI or "algorithmic finest pitch"
+// lookup). 1.0 = the real pitch; higher coarsens the grille so it reads at
+// smaller window sizes. Clamped [1,10]. Seeded from CRT_MASK_SCALE.
 void crt_bridge_set_mask_scale(CRTBridgeRef ref, float scale);
 
 // Peak highlights (replaces HDR on/off + boost): how far the tube's >1.0 peaks
@@ -108,7 +112,7 @@ void crt_bridge_set_convergence(CRTBridgeRef ref, float v);       // px, 0..~1
 void crt_bridge_set_h_jitter(CRTBridgeRef ref, float v);          // px, 0..~3
 void crt_bridge_set_v_jitter(CRTBridgeRef ref, float v);          // scanlines, 0..~2
 void crt_bridge_set_shot_noise(CRTBridgeRef ref, float v);        // 0..~0.05
-void crt_bridge_set_h_bandwidth(CRTBridgeRef ref, float v);       // RC rolloff β 0.2..1.0 (lower = sharper)
+void crt_bridge_set_h_bandwidth(CRTBridgeRef ref, float v);       // RC rolloff β 0..1.0 (lower = sharper, more ring; 0 = ringless legacy Gaussian, no anti-beat protection)
 void crt_bridge_set_h_focus(CRTBridgeRef ref, float v);           // optical H blur σ 0..3 source px (0 = focused)
 void crt_bridge_set_beam_segment(CRTBridgeRef ref, float v);      // beam temporal resolution 0..1: 1 = whole line at one instant (legacy, zero flicker), smaller = segmented dot (real sweep-time structure, flicker as the dial approaches a dot)
 void crt_bridge_set_shutter(CRTBridgeRef ref, float v);          // observer integration 0..1: 1 = fused eye (steady), lower = camera shutter (rolling band / flicker)

@@ -173,9 +173,9 @@ private func applyUserOverrides(_ state: CRTBridgeState) {
     // explicitly overridden it via crt_bridge_set_beam_segment (kept for ABI
     // compat / diagnostics; the 86Box UI no longer exposes it).
     state.filter.parameters.beam.beamSegmentFraction = state.beamSegmentOverride ?? 0.0
-    // Emitter lattice (E5 eyeball phase): real RGB phosphors for stripe
-    // presets; the engine gate keeps shadow/slot/triode legacy.
-    state.filter.parameters.phosphor.latticeEnabled = true
+    // (The emitter lattice this used to gate was deleted from CRTEngine
+    // 2026-08-12, commit a735bec — it was dormant machinery, never reachable
+    // from any host. `PhosphorParameters.latticeEnabled` no longer exists.)
     if let v = state.shutterOverride      { state.filter.parameters.display.observerShutter = v }
 }
 
@@ -308,14 +308,14 @@ private func recomputeLayout(_ state: CRTBridgeState) {
     _ = state.scaling.updateDrawableSize(state.drawableSize)
     let scanlines = signalScanlines(preset, Int(state.contentSize.y))
 
-    // Physical panel fact for the engine's panel-anchored pitch: native panel px per
-    // framebuffer(backing) px. 1.0 in native display mode; < 1 in a scaled desktop
-    // mode where the OS resamples the framebuffer down onto the panel. Falls back to
-    // 1.0 until the display env is known. This is a FACT WE REPORT, not a decision.
-    let info = state.displayEnv.info
-    let framebufferW = Float(info.logicalSize.width) * Float(info.backingScaleFactor)
-    let panelNativeW = Float(info.nativePixelWidth)
-    let panelScale: Float = (framebufferW > 1 && panelNativeW > 1) ? (panelNativeW / framebufferW) : 1.0
+    // Panel-anchored pitch is gone from CRTEngine: `DisplayInfo.nativePixelWidth`
+    // (the field this used to read) was deleted 2026-08-12/13 along with the rest
+    // of the panel-PPI model — stripe pitch is now derived purely from the preset's
+    // physical tube geometry (tvSizeInches × phosphorPitchMM), never host PPI. The
+    // `CRTLayoutInputs.backingToPanelScale` parameter below is consequently orphaned
+    // (no reader left in ScalingManager, verified by grep) but is kept at its
+    // identity value since the struct still declares it.
+    let panelScale: Float = 1.0
 
     // Build the layout with the preset's beam, then — only if the user moved the
     // sharpness dial — rebuild it with the mapped falloff.
@@ -391,15 +391,18 @@ private func makeInputs(_ state: CRTBridgeState,
         // steps. `renderWidthOverride` is non-zero only when the user pins it explicitly
         // (crt_bridge_set_render_resolution).
         renderResolutionWidth: state.renderWidthOverride,
-        // minStripePixels is unused on the .displayOnly path (the engine uses its
-        // panel-anchored pitch instead); 2.0 is the resample-safe fallback.
+        // minStripePixels is currently unread inside computeStripePitch on ANY
+        // renderIntent (`_ = minStripePixels // unused here for now` —
+        // ScalingManager.swift; stripe coarsening-to-a-floor is a deliberate
+        // later step) — 2.0 is the resample-safe value to have wired through
+        // once that lands.
         minStripePixels: 2.0,
         // 86Box presents 1:1 to a physical panel and never records — display-only. There
         // is no movie resolution to balance the mask against, unlike Phosphors.
         renderIntent: .displayOnly,
-        // Report the physical panel facts; the engine decides the pitch. backing→panel
-        // scale = native panel px per framebuffer(backing) px (1.0 native; <1 in a scaled
-        // "More Space" desktop where the OS resamples the framebuffer onto the panel).
+        // Orphaned in current CRTEngine (no reader in ScalingManager — the panel-PPI
+        // pitch model this fed was removed 2026-08-12/13). Kept at identity; see
+        // `panelScale` above.
         backingToPanelScale: panelScale,
         // Scanline anti-alias strength: the sharp half also relaxes the engine's
         // display-domain beam-sigma floor (tight beam + raw comb, user's alias risk).
@@ -699,12 +702,17 @@ public func crt_bridge_set_shot_noise(_ ref: UnsafeMutableRawPointer, _ v: Float
 }
 
 /// Horizontal video bandwidth — the raised-cosine reconstruction rolloff β
-/// [0.2 … 1.0]. Lower = wider flat passband = sharper; higher = softer rolloff.
-/// (Clamped ≥ 0.2 so the anti-banding reconstruction can't be disabled from here.)
+/// [0 … 1.0]. Lower = wider flat passband = sharper (but the sinc-derived filter's
+/// negative lobes ring more on hard edges); higher = softer rolloff, less ringing.
+/// 0 drops to CRTEngine's legacy Gaussian spot (`sampleBeamHSpot`), which is
+/// strictly positive — genuinely ringless, a pristine digital-VGA look — at the
+/// cost of losing the anti-banding reconstruction's resample-beat protection on
+/// modes where the render buffer isn't an integer multiple of the signal. That
+/// trade-off is the host's call to make per mode/preset, not a fixed floor.
 @_cdecl("crt_bridge_set_h_bandwidth")
 public func crt_bridge_set_h_bandwidth(_ ref: UnsafeMutableRawPointer, _ v: Float) {
     let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    let b = max(0.2, min(1.0, v))
+    let b = max(0.0, min(1.0, v))
     s.hBandwidthOverride = b
     s.filter.parameters.beam.beamHorizontalRolloff = b
 }
