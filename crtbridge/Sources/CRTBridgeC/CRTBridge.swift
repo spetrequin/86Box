@@ -381,12 +381,13 @@ private func makeInputs(_ state: CRTBridgeState,
         // steps. `renderWidthOverride` is non-zero only when the user pins it explicitly
         // (crt_bridge_set_render_resolution).
         renderResolutionWidth: state.renderWidthOverride,
-        // minStripePixels is currently unread inside computeStripePitch on ANY
-        // renderIntent (`_ = minStripePixels // unused here for now` —
-        // ScalingManager.swift; stripe coarsening-to-a-floor is a deliberate
-        // later step) — 2.0 is the resample-safe value to have wired through
-        // once that lands.
-        minStripePixels: 2.0,
+        // No minStripePixels. It is NOT passed because there is no floor to arm: the
+        // engine accepted, clamped and documented that parameter while discarding it
+        // unread, so the 2.0 this used to pass armed nothing. Dropped from CRTEngine in
+        // chore/drop-unread-minstripepixels. Omitting it compiles against the engine
+        // both before and after that change, so this file does not need to move in step
+        // with the merge. If stripe coarsening lands later it will bring a parameter
+        // that is actually read — wire that one up then, not this one.
         // 86Box presents 1:1 to a physical panel and never records — display-only. There
         // is no movie resolution to balance the mask against, unlike Phosphors.
         renderIntent: .displayOnly,
