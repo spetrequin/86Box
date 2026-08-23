@@ -72,8 +72,6 @@ public:
     void setHFocus(float v);                /* optical H blur σ 0..3 source px */
     void setBeamSegment(float v);           /* beam temporal resolution 0..1 (1 = whole line, <1 = segmented dot) */
     void setShutter(float v);               /* observer integration 0..1 (1 = fused eye, <1 = camera shutter) */
-    void setScanlineSmoothing(float v);     /* 0..1 scanline gap-fill (band-limit) */
-    void setPatternSmooth(float v);         /* 0..1 mask anti-alias at chosen Pattern Scale */
     void setMaskScale(float v);             /* RGB mask 1x/2x/3x (multiplier of finest) */
     void setPeakHighlights(float v);        /* tube peak headroom 1.0 (SDR look) .. 3.0, capped by live panel headroom */
     void setPreset(int idx);                /* CRT preset by index (see kCrtPresetNames) */

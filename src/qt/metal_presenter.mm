@@ -586,8 +586,6 @@ void MetalPresenter::setHBandwidth(float v)     { CRT_SET(crt_bridge_set_h_bandw
 void MetalPresenter::setHFocus(float v)         { CRT_SET(crt_bridge_set_h_focus(impl->crt, v),          "crt.hfocus", v); }
 void MetalPresenter::setBeamSegment(float v)    { CRT_SET(crt_bridge_set_beam_segment(impl->crt, v),     "crt.beamseg", v); }
 void MetalPresenter::setShutter(float v)        { CRT_SET(crt_bridge_set_shutter(impl->crt, v),          "crt.shutter", v); }
-void MetalPresenter::setScanlineSmoothing(float v) { CRT_SET(crt_bridge_set_scanline_smoothing(impl->crt, v), "crt.scansmooth", v); }
-void MetalPresenter::setPatternSmooth(float v)  { CRT_SET(crt_bridge_set_pattern_smooth(impl->crt, v),   "crt.patsmooth", v); }
 void MetalPresenter::setMaskScale(float v)      { CRT_SET(crt_bridge_set_mask_scale(impl->crt, v),       "crt.maskscale", v); }
 void MetalPresenter::setPeakHighlights(float v) { CRT_SET(crt_bridge_set_peak_highlights(impl->crt, v),  "crt.peaks", v); }
 void MetalPresenter::setPreset(int idx)         { if (idx < 0 || idx >= 6) return; CRT_SET(crt_bridge_set_preset(impl->crt, kCrtPresetNames[idx]), "crt.preset", idx); }
@@ -641,8 +639,22 @@ MetalPresenter::loadSettings()
     if (has("crt.hbandwidth"))   crt_bridge_set_h_bandwidth(impl->crt, fv("crt.hbandwidth"));
     if (has("crt.hfocus"))       crt_bridge_set_h_focus(impl->crt, fv("crt.hfocus"));
     if (has("crt.shutter"))      crt_bridge_set_shutter(impl->crt, fv("crt.shutter"));
-    if (has("crt.scansmooth"))   crt_bridge_set_scanline_smoothing(impl->crt, fv("crt.scansmooth"));
-    if (has("crt.patsmooth"))    crt_bridge_set_pattern_smooth(impl->crt, fv("crt.patsmooth"));
+    // crt.scansmooth and crt.patsmooth are NOT read any more, and must not be re-added.
+    //
+    // Both sliders were removed from qt_metalrenderer.mm, but this loader kept applying
+    // whatever they had last persisted — values with no UI left to undo them, re-applied on
+    // every launch. The pair had drifted to 0.078 and 0, which between them relaxed the
+    // engine's display-domain beam-sigma floor (0.9 -> 0.60 display px), all but disabled
+    // scanlineBandLimit, and dropped the mask band-limit to raw. Measured cost at 1024x768:
+    // the scanline comb folded to a 15 px beat at 8x the amplitude of the same picture in
+    // Phosphors, which has no such controls and pins both at their safe defaults.
+    //
+    // Both now sit at the engine's defaults (scanlineSmoothing 1.0 in makeInputs,
+    // maskSmoothing 1.0 untouched). The stale keys are deliberately ignored, not migrated:
+    // there is no value of either worth restoring. THE LESSON: a persisted key outlives the
+    // control that wrote it, so removing a slider means removing its loader in the same
+    // commit — otherwise the last value a user happened to leave becomes a permanent,
+    // invisible override.
     if (has("crt.maskscale"))    crt_bridge_set_mask_scale(impl->crt, fv("crt.maskscale"));
     // Peak highlights (the old crt.hdrenabled/hdrboost keys are retired — EDR is no
     // longer a gain, so their values have no meaning under the new curve).

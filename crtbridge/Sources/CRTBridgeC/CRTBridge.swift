@@ -79,8 +79,6 @@ private final class CRTBridgeState {
     var signalNoiseOverride:  Float? = nil
     var hBandwidthOverride:   Float? = nil   // raised-cosine rolloff β (video bandwidth)
     var hFocusOverride:       Float? = nil   // optical horizontal focus σ (source px)
-    var scanSmoothOverride:   Float? = nil   // scanline gap-fill strength (band-limit)
-    var patternSmoothOverride: Float? = nil  // mask anti-alias strength (band-limit margin)
     var beamSegmentOverride:  Float? = nil   // beam temporal resolution (1 = legacy whole-line, <1 = segmented dot)
     var shutterOverride:      Float? = nil   // observer integration (1 = fused eye, <1 = camera shutter)
     let displayEnv = DisplayEnvironment()
@@ -167,8 +165,6 @@ private func applyUserOverrides(_ state: CRTBridgeState) {
     if let v = state.signalNoiseOverride  { state.filter.parameters.aging.signalNoise = v }
     if let v = state.hBandwidthOverride   { state.filter.parameters.beam.beamHorizontalRolloff = v }
     if let v = state.hFocusOverride       { state.filter.parameters.beam.beamHorizontalSpot = v }
-    if let v = state.scanSmoothOverride   { state.filter.parameters.beam.scanlineBandLimit = v }
-    if let v = state.patternSmoothOverride { state.filter.parameters.display.maskSmoothing = v }
     // The beam is pinned to the DOT (its physical truth) unless a host has
     // explicitly overridden it via crt_bridge_set_beam_segment (kept for ABI
     // compat / diagnostics; the 86Box UI no longer exposes it).
@@ -241,12 +237,6 @@ private func applyPresetInternal(_ state: CRTBridgeState,
                                            sourceHeight: content.y,
                                            refreshRate: refreshHz)
     }
-
-    // Stripe(1)/slot(3) masks carry a pure-primary RGB carrier that rainbows on
-    // resample; the chroma notch collapses it toward neutral. (Phosphors sets 1.0.)
-    let pattern = effectivePattern(state)
-    state.filter.parameters.display.chromaNotchStrength =
-        (pattern == 1 || pattern == 3) ? 1.0 : 0.0
 
     state.scaling = ScalingManager(scanlineCount: scanlines,
                                    aspectRatio: 4.0 / 3.0)
@@ -404,9 +394,21 @@ private func makeInputs(_ state: CRTBridgeState,
         // pitch model this fed was removed 2026-08-12/13). Kept at identity; see
         // `panelScale` above.
         backingToPanelScale: panelScale,
-        // Scanline anti-alias strength: the sharp half also relaxes the engine's
-        // display-domain beam-sigma floor (tight beam + raw comb, user's alias risk).
-        scanlineSmoothing: state.scanSmoothOverride ?? 1.0
+        // Scanline anti-alias strength, PINNED at 1.0 — the engine's full,
+        // measured-safe display-domain beam-sigma floor (0.9 display px).
+        //
+        // This was a host dial until 2026-08-22. It is not one any more, because its
+        // sharp half relaxes that floor toward ~0.55 display px, and the floor is the
+        // only thing standing between the scanline comb and the panel's Nyquist limit.
+        // Above VGA there is nothing to buy on the other side of that trade: at 768
+        // lines in a 1440-tall viewport the displayed pitch is 1.875 px, so there are
+        // no resolvable scanline gaps to sharpen — the sharp end spends the floor and
+        // returns aliasing. Measured on this host: at 0.078 the comb folded to a 15 px
+        // beat carrying 8x the amplitude of the same picture in Phosphors.
+        //
+        // Phosphors reached the same place from the other direction — it dropped its
+        // Scanline Smooth slider and pins the model value at 1.0. Both hosts now agree.
+        scanlineSmoothing: 1.0
         // NOTE: displayMaskScale is NOT passed — it's orphaned in CRTEngine 1.4.0 (stored,
         // never read). Pattern Scale is applied via filter.apply(patternScale:) in recomputeLayout.
     )
@@ -630,14 +632,12 @@ public func crt_bridge_set_contrast(_ ref: UnsafeMutableRawPointer, _ v: Float) 
 }
 
 /// Phosphor pattern override: 0=triode, 1=stripe (aperture grille), 2=shadow
-/// mask, 3=slot mask. Re-lays out and refreshes mask/chroma/brightness state.
+/// mask, 3=slot mask. Re-lays out and refreshes mask/brightness state.
 @_cdecl("crt_bridge_set_phosphor_pattern")
 public func crt_bridge_set_phosphor_pattern(_ ref: UnsafeMutableRawPointer, _ pattern: Int32) {
     let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
     state.patternOverride = Int(max(0, min(3, pattern)))
     recomputeLayout(state)
-    let p = effectivePattern(state)
-    state.filter.parameters.display.chromaNotchStrength = (p == 1 || p == 3) ? 1.0 : 0.0
     // (No applyDisplayEnvironment here: refresh/EDR don't depend on pattern, and the old
     // pattern-dependent stripeBrightnessBoost it used to refresh is gone as of 1.4.0.)
 }
@@ -758,28 +758,6 @@ public func crt_bridge_set_shutter(_ ref: UnsafeMutableRawPointer, _ v: Float) {
     s.filter.parameters.display.observerShutter = f
 }
 
-/// Scanline smoothing [0 … 1]: fills the scanline gaps when the output can't
-/// resolve them (< ~3 px/scanline — small windows, low-res recordings), trading
-/// gap depth for freedom from shimmer/aliasing. 0 = sharp gaps everywhere.
-@_cdecl("crt_bridge_set_scanline_smoothing")
-public func crt_bridge_set_scanline_smoothing(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    let f = max(0.0, min(1.0, v))
-    s.scanSmoothOverride = f
-    s.filter.parameters.beam.scanlineBandLimit = f
-    recomputeLayout(s)   // the sharp half also relaxes the beam-sigma floor (layout-derived)
-}
-
-/// Pattern smoothing [0 … 1]: mask anti-alias strength at the chosen Pattern Scale.
-/// 1 = full band-limit margin (clean), 0.5 = pre-margin ramp, 0 = raw pattern
-/// (maximum grille detail, moiré is the user's choice).
-@_cdecl("crt_bridge_set_pattern_smooth")
-public func crt_bridge_set_pattern_smooth(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    let f = max(0.0, min(2.0, v))
-    s.patternSmoothOverride = f
-    s.filter.parameters.display.maskSmoothing = f
-}
 
 /// Additive signal noise / snow (0 … ~0.15).
 @_cdecl("crt_bridge_set_signal_noise")

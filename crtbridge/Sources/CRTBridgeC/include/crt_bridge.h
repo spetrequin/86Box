@@ -116,8 +116,6 @@ void crt_bridge_set_h_bandwidth(CRTBridgeRef ref, float v);       // RC rolloff 
 void crt_bridge_set_h_focus(CRTBridgeRef ref, float v);           // optical H blur σ 0..3 source px (0 = focused)
 void crt_bridge_set_beam_segment(CRTBridgeRef ref, float v);      // beam temporal resolution 0..1: 1 = whole line at one instant (legacy, zero flicker), smaller = segmented dot (real sweep-time structure, flicker as the dial approaches a dot)
 void crt_bridge_set_shutter(CRTBridgeRef ref, float v);          // observer integration 0..1: 1 = fused eye (steady), lower = camera shutter (rolling band / flicker)
-void crt_bridge_set_scanline_smoothing(CRTBridgeRef ref, float v); // 0..1 gap-fill when output can't resolve scanlines
-void crt_bridge_set_pattern_smooth(CRTBridgeRef ref, float v);     // 0..2 mask anti-alias (1 = clean default, 2 = pattern dissolved)
 void crt_bridge_set_signal_noise(CRTBridgeRef ref, float v);      // 0..~0.15
 
 // Lay the screen out for a given drawable size (the on-screen widget size).
