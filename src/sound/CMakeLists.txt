@@ -44,6 +44,7 @@ add_library(snd OBJECT
     snd_cms.c
     snd_csm.c
     snd_cmi8x38.c
+    snd_solo1.c
     snd_covox.c
     snd_cs423x.c
     snd_imfc.cpp
@@ -54,6 +55,7 @@ add_library(snd OBJECT
     snd_mmb.c
     snd_mpu401.c
     snd_pas16.c
+    snd_jazz16.c
     snd_saaym.c
     snd_sn76489.c
     snd_ssi2001.c
@@ -97,11 +99,13 @@ elseif(OPENAL)
 
     if(TARGET OpenAL::OpenAL)
         target_link_libraries(86Box OpenAL::OpenAL)
+        target_link_libraries(snd PRIVATE OpenAL::OpenAL)
         if(WIN32 AND STATIC_BUILD)
             target_link_libraries(OpenAL::OpenAL INTERFACE avrt)
         endif()
     else()
         target_link_libraries(86Box ${OPENAL_LIBRARY})
+        target_include_directories(snd PRIVATE ${OPENAL_INCLUDE_DIR})
         if(WIN32 AND STATIC_BUILD)
             target_link_libraries(${OPENAL_LIBRARY} INTERFACE avrt)
         endif()

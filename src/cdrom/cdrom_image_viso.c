@@ -857,7 +857,7 @@ viso_init(const uint8_t id, const char *dirname, int *error)
     image_viso_log(viso->tf.log, "[%08X] %s => [root]\n", dir, dir->path);
 
     /* Traverse directories, starting with the root. */
-    plat_dir_t     context         = { 0 };
+    plat_dir_t     context         = PLAT_DIR_INIT;
     viso_entry_t **dir_entries     = NULL;
     size_t         dir_entries_len = 0;
     while (LIKELY(dir)) {
@@ -1046,7 +1046,13 @@ next_dir:
     }
 
     /* Get root directory basename for the volume ID. */
-    const char *basename = path_get_filename(viso->root_dir->path);
+    char  *volume_path    = viso->root_dir->path;
+    size_t path_len       = strlen(volume_path);
+    while ((path_len > 0) && ((volume_path[path_len - 1] == '/') || (volume_path[path_len - 1] == '\\')))
+        path_len--;
+    char saved_trailer    = volume_path[path_len];
+    volume_path[path_len] = '\0';
+    const char *basename  = path_get_filename(volume_path);
     if (!basename || !basename[0])
         basename = EMU_NAME;
 
@@ -1192,6 +1198,7 @@ next_dir:
             fwrite(data, viso->sector_size, 1, viso->tf.fp);
         }
     }
+    volume_path[path_len] = saved_trailer;
 
     /* Fill terminator. */
     p = data;

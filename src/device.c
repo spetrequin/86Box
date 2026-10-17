@@ -191,6 +191,7 @@ device_set_context(device_context_t *ctx, const device_t *dev, int inst)
         { .old = "IBM XT Model 286", .new = "IBM XT model 286" },
         { .old = "Packard Bell Legend 300SX", .new = "Packard Bell PB300" },
         { .old = "Packard Bell PB300/PB320", .new = "Packard Bell PB300" }, /* 6.0 pre-release */
+        { .old = "IBM XT (1982) w/ Intel Inboard 386/PC", .new = "IBM XT (Inboard 386/PC)" },
         { .old = "DataExpert SX495", .new = "DataExpert OPTI-495SX" },
         { .old = "Packard Bell PB410/PB410A/PB420/PB420T", .new = "Packard Bell PB410A" }, /* 6.0 pre-release */
         { .old = "Intel Premiere/PCI (Batman)", .new = "Intel Premiere/PCI" },
@@ -232,16 +233,35 @@ device_set_context(device_context_t *ctx, const device_t *dev, int inst)
         { .old = "Aztech Sound Galaxy Pro 16 (AZTPR16)", .new = "Aztech Sound Galaxy Pro 16" },
         { .old = "HP Multimedia Pro 16V-A (AZT2320)", .new = "HP Multimedia Pro 16V-A" },
         { .old = "IBM PS/2 ESDI Fixed Disk Adapter (MCA)", .new = "IBM ESDI Fixed Disk Adapter" },
-        { .old = "IBM Integrated Fixed Disk and Controller (MCA)", .new = "IBM Integrated Fixed Disk" },
         { .old = "IBM PS/2 ST506 Fixed Disk Adapter (MCA)", .new = "IBM ST506 Fixed Disk Adapter" },
         { .old = "Cirrus Logic GD5401 (ISA) (ACUMOS AVGA1)", .new = "Cirrus Logic GD5401 (ISA)" },
         { .old = "Cirrus Logic GD5401 (ISA) (ACUMOS AVGA1) (On-Board)", .new = "Cirrus Logic GD5401 (ISA) (On-Board)" },
         { .old = "Cirrus Logic GD5402 (ISA) (ACUMOS AVGA2)", .new = "Cirrus Logic GD5402 (ISA)" },
         { .old = "Cirrus Logic GD5402 (ISA) (ACUMOS AVGA2) (On-Board)", .new = "Cirrus Logic GD5402 (ISA) (On-Board)" },
         { .old = "Cirrus Logic GD5402 (ISA) (ACUMOS AVGA2) (On-Board) (Commodore)", .new = "Cirrus Logic GD5402 (ISA) (On-Board) (Commodore)" },
-        { .old = "Cirrus Logic GD5428 (MCA) (IBM SVGA Adapter/A)", .new = "Cirrus Logic GD5428 (MCA)" },
+        { .old = "Cirrus Logic GD5428 (MCA) (IBM SVGA Adapter/A)", .new = "Cirrus Logic GD5428 (MCA) (US/EMEA)" },
         { .old = "Cirrus Logic GD5426 (MCA) (Reply Video Adapter)", .new = "Cirrus Logic GD5426 (MCA)" },
         { .old = "3dfx Voodoo3 2000 (On-Board 8MB SGRAM)", .new = "3dfx Voodoo3 2000 (On-Board)" },
+        { .old = "Gravis/Synergy Vipermax", .new = "Synergy ViperMAX" },
+        { .old = "Colorplus", .new = "Plantronics Colorplus" },
+        { .old = "Creative Sound Blaster PCI 128 (ES1373)", .new = "Sound Blaster PCI 128 (ES1373)" },
+        { .old = "Creative Sound Blaster PCI 128 (ES1373) (On-Board)", .new = "Sound Blaster PCI 128 (ES1373) (On-Board)" },
+        { .old = "Creative Sound Blaster PCI 4.1 (CT5880)", .new = "Sound Blaster PCI 4.1 (CT5880)" },
+        { .old = "Creative Sound Blaster PCI 4.1 (CT5880) (On-Board)", .new = "Sound Blaster PCI 4.1 (CT5880) (On-Board)" },
+        { .old = "Gravis UltraSound PnP (Old PnP ROM)", .new = "Gravis UltraSound PnP (Old)" },
+        { .old = "Gravis UltraSound PnP (New PnP ROM)", .new = "Gravis UltraSound PnP (New)" },
+        { .old = "Gravis UltraSound PnP (No CD-ROM)", .new = "Gravis UltraSound PnP (No CD)" },
+        { .old = "Compaq/STB UltraSound 32", .new = "Compaq UltraSound 32" },
+        { .old = "IBM PS/2 Adapter/A for Ethernet Networks (WD8013WP/A, AUI/RJ-45, EFD4/92F0046)", .new = "IBM PS/2 Adapter/A (WD8013WP/A)" },
+        { .old = "IBM PS/2 Adapter/A for Ethernet Networks (WD8013EP/A, AUI/BNC, EFD5)", .new = "IBM PS/2 Adapter/A (WD8013EP/A)" },
+        { .old = "IBM PS/2 Adapter/A for Ethernet Networks (WD8003E/A, AUI/BNC, EFE5)", .new = "IBM PS/2 Adapter/A (WD8003E/A)" },
+        { .old = "Adaptec AHA-2940", .new = "Adaptec AHA-2940 (AIC-7870)" },
+        { .old = "Adaptec AHA-2940U", .new = "Adaptec AHA-2940 Ultra (AIC-7880)" },
+        { .old = "Adaptec AHA-2940 Ultra", .new = "Adaptec AHA-2940 Ultra (AIC-7880)" },
+        { .old = "Adaptec AHA-2944 Ultra Wide (differential)", .new = "Adaptec AHA-2944UW" },
+        { .old = "Cirrus Logic GD5428 (MCA)", .new = "Cirrus Logic GD5428 (MCA) (US/EMEA)" },
+        { .old = "ATI Mach64GX ISA", .new = "ATI Graphics Pro Turbo (Mach64GX) ISA" },
+        { .old = "ATI Mach64GX VLB", .new = "ATI Graphics Pro Turbo (Mach64GX) VLB" },
         { 0 }
     };
 
@@ -361,8 +381,8 @@ device_add_common(const device_t *dev, void *p, void *params, int inst)
     for (c = 0; c < DEVICE_MAX; c++) {
         if ((devices[c] == dev) && (device_state[c].local == init_dev->local) &&
             (device_state[c].inst == inst)) {
-            device_log("DEVICE: Device \"%s\", local %016" PRIX64 ", inst %i already exists!\n",
-                       init_dev->name, init_dev->local,
+            warning("DEVICE: Device \"%s\", local 0x%016" PRIX64 ", inst %i already exists!\n",
+                       init_dev->name, (uint64_t) init_dev->local,
                        inst);
             return (NULL);
         }
@@ -610,7 +630,8 @@ device_reset_all(uint32_t match_flags)
 {
     for (uint16_t c = 0; c < DEVICE_MAX; c++) {
         if (devices[c] != NULL) {
-            if ((devices[c]->reset != NULL) && (devices[c]->flags & match_flags))
+            if ((devices[c]->reset != NULL) &&
+                ((match_flags == DEVICE_ALL) || (devices[c]->flags & match_flags)))
                 devices[c]->reset(device_priv[c]);
         }
     }
@@ -653,7 +674,7 @@ device_available(const device_t *dev)
 
     if (ret == 0) {
         /* No CONFIG_BIOS field present, use the classic available(). */
-        if (dev->available != NULL)
+        if ((dev != NULL) && (dev->available != NULL))
             ret = (dev->available());
         else
             ret = (dev != NULL);
@@ -666,6 +687,11 @@ device_available(const device_t *dev)
 static const device_config_bios_t *
 device_get_bios(const device_t *dev, const char *internal_name)
 {
+    if (internal_name == NULL) {
+        fatal("Failed to get the default BIOS for this device, please update your ROM set and contact 86Box support if it still occurs\n");
+        return NULL;
+    }
+
     if (dev != NULL) {
         const device_config_t *config = dev->config;
         while (config && (config->type != CONFIG_END)) {
@@ -775,6 +801,8 @@ device_get_bus_name(const device_t *dev)
         sbus = "Sidecar";
     else if (dev->flags & DEVICE_XT_KBC)
         sbus = "XT KBC";
+    else if ((dev->flags & (DEVICE_ISA | DEVICE_ISA16)) == (DEVICE_ISA | DEVICE_ISA16))
+        sbus = "ISA/ISA16";
     else if (dev->flags & DEVICE_ISA16)
         sbus = "ISA16";
     else if (dev->flags & DEVICE_AT_KBC)
@@ -921,6 +949,28 @@ device_force_redraw(void)
 }
 
 int
+device_has_power_button(void)
+{
+    for (uint16_t c = 0; c < DEVICE_MAX; c++) {
+        if ((devices[c] != NULL) && (devices[c]->power_button != NULL))
+            return 1;
+    }
+
+    return 0;
+}
+
+void
+device_power_button(void)
+{
+    for (uint16_t c = 0; c < DEVICE_MAX; c++) {
+        if (devices[c] != NULL) {
+            if (devices[c]->power_button != NULL)
+                devices[c]->power_button(device_priv[c]);
+        }
+    }
+}
+
+int
 device_get_instance(void)
 {
     return device_current.instance;
@@ -947,6 +997,74 @@ device_get_config_string(const char *str)
     }
 
     return ret;
+}
+
+const char *
+device_get_config_bios(const char *str)
+{
+    const char *ret = "";
+
+    if (device_current.dev != NULL) {
+        const device_config_t *cfg = device_current.dev->config;
+
+        while ((cfg != NULL) && (cfg->type != CONFIG_END)) {
+            if (!strcmp(str, cfg->name)) {
+                const char *s = (config_get_string(device_current.name,
+                                 (char *) str, (char *) cfg->default_string));
+                if ((s != NULL) && (strlen(s) == 1)) {
+                    switch (s[0]) {
+                        default:
+                            ret = "";
+                            fatal("Invalid config integer: %i\n", s[0]);
+                            break;
+                        case '0':
+                            ret = "voodoo";
+                            config_set_string(device_current.name, str, ret);
+                            break;
+                        case '1':
+                            ret = "obsidian_sb50";
+                            config_set_string(device_current.name, str, ret);
+                            break;
+                        case '2':
+                            ret = "voodoo_2";
+                            config_set_string(device_current.name, str, ret);
+                            break;
+                    }
+                } else
+                    ret = (s == NULL) ? "" : s;
+                break;
+            }
+
+            cfg++;
+        }
+    }
+
+    return ret;
+}
+
+void
+device_migrate_config_bios(const void *priv, const char *name)
+{
+    const device_config_t *cfg = (const device_config_t *) priv;
+
+    const char *s = config_get_string(name, cfg->name, (char *) cfg->default_string);
+
+    if ((s != NULL) && (strlen(s) == 1)) {
+        switch (s[0]) {
+            default:
+                fatal("Invalid config integer: %i\n", s[0]);
+                break;
+            case '0':
+                config_set_string(name, cfg->name, "voodoo");
+                break;
+            case '1':
+                config_set_string(name, cfg->name, "obsidian_sb50");
+                break;
+            case '2':
+                config_set_string(name, cfg->name, "voodoo_2");
+                break;
+        }
+    }
 }
 
 int
@@ -1125,9 +1243,12 @@ device_is_valid(const device_t *device, int mch)
     int ret = 1;
 
     if ((device != NULL) && ((device->flags & DEVICE_BUS) != 0)) {
-        /* Hide PCI devices on machines with only an internal PCI bus. */
+        /* Hide PCI or AGP devices on machines with only an internal PCI or AGP bus. */
         if ((device->flags & DEVICE_PCI) &&
             machine_has_flags(mch, MACHINE_PCI_INTERNAL))
+            ret = 0;
+        else if ((device->flags & DEVICE_AGP) &&
+                 machine_has_flags_64(mch, MACHINE_AGP_INTERNAL))
             ret = 0;
         else
             ret = machine_has_bus(mch, device->flags & DEVICE_BUS);
@@ -1233,6 +1354,20 @@ const device_t device_none = {
 const device_t device_internal = {
     .name          = "Internal",
     .internal_name = "internal",
+    .flags         = 0,
+    .local         = 0,
+    .init          = NULL,
+    .close         = NULL,
+    .reset         = NULL,
+    .available     = NULL,
+    .speed_changed = NULL,
+    .force_redraw  = NULL,
+    .config        = NULL
+};
+
+const device_t device_external = {
+    .name          = "External",
+    .internal_name = "external",
     .flags         = 0,
     .local         = 0,
     .init          = NULL,

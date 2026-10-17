@@ -96,6 +96,9 @@ am29f016d_read(uint32_t addr, void *priv)
     uint8_t            ret;
     const uint32_t     calc = am29f016d_calc_addr(dev, addr);
 
+    if (!flash_bios_read_selected(addr))
+        return 0xff;
+
     switch (dev->state) {
         default:
             ret = 0xff;
@@ -214,6 +217,9 @@ am29f016d_readw(uint32_t addr, void *priv)
     uint16_t           ret;
     const uint32_t     calc = am29f016d_calc_addr(dev, addr);
 
+    if (!flash_bios_read_selected(addr))
+        return 0xffff;
+
     switch (dev->state) {
         default:
             ret = 0xffff;
@@ -239,6 +245,9 @@ am29f016d_readl(uint32_t addr, void *priv)
     uint32_t           ret;
     const uint32_t     calc = am29f016d_calc_addr(dev, addr);
 
+    if (!flash_bios_read_selected(addr))
+        return 0xffffffff;
+
     switch (dev->state) {
         default:
             ret = 0xffffffff;
@@ -262,6 +271,9 @@ am29f016d_write(uint32_t addr, uint8_t val, void *priv)
 {
     am29f016d_t *  dev  = (am29f016d_t *) priv;
     const uint32_t calc = am29f016d_calc_addr(dev, addr);
+
+    if (!flash_bios_write_selected(addr))
+        return;
 
     switch (dev->cycle) {
         default:
@@ -388,6 +400,9 @@ am29f016d_writew(uint32_t addr, uint16_t val, void *priv)
     am29f016d_t *  dev  = (am29f016d_t *) priv;
     const uint32_t calc = am29f016d_calc_addr(dev, addr);
 
+    if (!flash_bios_write_selected(addr))
+        return;
+
     if ((dev->cycle == 0) && (dev->state == AMD_STATE_PROGRAM)) {
         *(uint16_t *) &(dev->array[calc]) = val;
         dev->state = AMD_STATE_READ_ARRAY;
@@ -402,6 +417,9 @@ am29f016d_writel(uint32_t addr, uint32_t val, void *priv)
 {
     am29f016d_t *  dev  = (am29f016d_t *) priv;
     const uint32_t calc = am29f016d_calc_addr(dev, addr);
+
+    if (!flash_bios_write_selected(addr))
+        return;
 
     if ((dev->cycle == 0) && (dev->state == AMD_STATE_PROGRAM)) {
         *(uint32_t *) &(dev->array[calc]) = val;
@@ -520,13 +538,16 @@ am29f016d_init(const device_t *info)
 
     am29f016d_add_mappings(dev);
 
-    FILE *fp = nvr_fopen(dev->flash_path, "rb");
-    if (fp) {
-        if (fread(&(dev->array[0x00000]), 1, 0x00200000, fp) != 0x00200000)
-            pclog("Less than %i bytes read from the Am29F016D Flash ROM file\n", dev->size);
-        fclose(fp);
+    if (strlen(dev->flash_path) > 0) {
+        FILE *fp = nvr_fopen(dev->flash_path, "rb");
+        if (fp != NULL) {
+            if (!dump_missing)
+                (void) !fread(&(dev->array[0x00000]), 1, 0x00200000, fp);
+            fclose(fp);
+        } else if (!dump_missing)
+            dev->dirty = 1; /* It is by definition dirty on creation. */
     } else
-        dev->dirty = 1; /* It is by definition dirty on creation. */
+        fatal("Attempting to open the Flash file for reading with an empty invalid name\n");
 
     return dev;
 }
@@ -537,11 +558,16 @@ am29f016d_close(void *priv)
     am29f016d_t *dev = (am29f016d_t *) priv;
 
     if (dev->dirty) {
-        FILE *fp = nvr_fopen(dev->flash_path, "wb");
-        if (fp != NULL) {
-            fwrite(&(dev->array[0x00000]), 0x00200000, 1, fp);
-            fclose(fp);
-        }
+        if (strlen(dev->flash_path) > 0) {
+            FILE *fp = nvr_fopen(dev->flash_path, "wb");
+            if (fp != NULL) {
+                if (!dump_missing)
+                    fwrite(&(dev->array[0x00000]), 0x00200000, 1, fp);
+                fclose(fp);
+            } else if (!dump_missing)
+                warning("Unable to open %s for writing, please make sure your NVR folder is writable\n", dev->flash_path);
+        } else
+            fatal("Attempting to open the Flash file for writing with an empty invalid name\n");
     }
 
     free(dev);

@@ -33,6 +33,10 @@
 #include <QFile>
 #include <QTextStream>
 
+#ifdef Q_OS_MACOS
+#    include <pthread/qos.h>
+#endif
+
 #ifdef QT_STATIC
 /* Static builds need plugin imports */
 #    include <QtPlugin>
@@ -55,10 +59,6 @@ extern "C" {
 #include <86box/gdbstub.h>
 #include <86box/version.h>
 #include <86box/renderdefs.h>
-#ifdef Q_OS_LINUX
-#    define GAMEMODE_AUTO
-#    include "../unix/gamemode/gamemode_client.h"
-#endif
 }
 
 #ifdef Q_OS_WINDOWS
@@ -99,12 +99,19 @@ extern "C" {
 #include "cpu.h"
 #include <86box/timer.h>
 #include <86box/nvr.h>
+#include <86box/automation.h>
 extern int  qt_nvr_save(void);
+#ifndef Q_OS_MACOS
 extern void exit_pause(void);
+#endif
 
 bool cpu_thread_running = false;
 bool fast_forward = false;
 }
+
+#ifdef Q_OS_MACOS
+extern void exit_pause(void);
+#endif
 
 #include <locale.h>
 
@@ -216,6 +223,9 @@ extern int         main_window_blocked;
 static LRESULT CALLBACK
 emu_LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
+    if (is_quit)
+        return CallNextHookEx(NULL, nCode, wParam, lParam);
+
     LPKBDLLHOOKSTRUCT lpKdhs = (LPKBDLLHOOKSTRUCT) lParam;
     /* Checks if CTRL was pressed. */
     BOOL bCtrlDown      = GetAsyncKeyState(VK_CONTROL) >> ((sizeof(SHORT) * 8) - 1);
@@ -443,6 +453,12 @@ main_thread_fn()
     int frames;
 
     QThread::currentThread()->setPriority(QThread::HighestPriority);
+#ifdef Q_OS_MACOS
+    /* QoS class, not just pthread priority: without it this thread is
+       E-core-eligible and its sleeps are coalescible, which measurably
+       destabilizes realtime pacing under render load. */
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
     plat_set_thread_name(nullptr, "main_thread");
     framecountx = 0;
     // title_update = 1;
@@ -452,7 +468,7 @@ main_thread_fn()
     const qint64 max_debt_ns = 50000000LL;
     frames                   = 0;
     debt_ns                  = 0;
-    is_cpu_thread             = 1;
+    is_cpu_thread            = 1;
     while (!is_quit && cpu_thread_run) {
         /* See if it is time to run a frame of code. */
         const qint64 new_ns = elapsed_timer.nsecsElapsed();
@@ -464,7 +480,9 @@ main_thread_fn()
         if (gdbstub_next_asap && (debt_ns < quantum_ns))
             debt_ns = quantum_ns;
 #endif
-        if (((debt_ns >= quantum_ns) || fast_forward) && !dopause) {
+        automation_poll();
+        const int automation = automation_run_state();
+        if (((debt_ns >= quantum_ns) || fast_forward || (automation == AUTOMATION_RUN)) && !dopause && (automation != AUTOMATION_HOLD)) {
             /*
              * Pace with one pc_run() per scheduler pass.
              * We intentionally avoid burst catch-up (multi-frame loop) because it can
@@ -474,6 +492,7 @@ main_thread_fn()
             uint64_t start_time = elapsed_timer.nsecsElapsed();
 #endif
             pc_run();
+            automation_quantum();
 
 #ifdef USE_INSTRUMENT
             if (instru_enabled) {
@@ -491,7 +510,9 @@ main_thread_fn()
                 frames     = 0;
             }
 
-            if (!fast_forward && debt_ns >= quantum_ns)
+            if (automation == AUTOMATION_RUN)
+                debt_ns = 0; /* unpaced automation steps must not cause catch-up later */
+            else if (!fast_forward && debt_ns >= quantum_ns)
                 debt_ns -= quantum_ns;
             else
                 debt_ns = 0;
@@ -686,6 +707,18 @@ main(int argc, char *argv[])
 
     pc_init_modules();
 
+    for (int i = 0; i < argc; i++) {
+        if (!strcasecmp(argv[i], "--assume_copied_vm")) {
+            util::storeCurrentUuid();
+            util::generateNewMacAdresses();
+            break;
+        }
+        if (!strcasecmp(argv[i], "--assume_moved_vm")) {
+            util::storeCurrentUuid();
+            break;
+        }
+    }
+
     // UUID / copy / move detection
     if (!util::compareUuid()) {
         QMessageBox movewarnbox;
@@ -755,6 +788,10 @@ main(int argc, char *argv[])
 
 #ifdef DISCORD
     discord_load();
+#endif
+
+#ifdef Q_OS_MACOS
+    exit_pause();
 #endif
 
 #ifdef Q_OS_WINDOWS

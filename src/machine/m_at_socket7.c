@@ -179,13 +179,9 @@ machine_at_rubyusb_init(const machine_t *model)
 {
     int ret;
 
-    ret = bios_load_linear_combined2("roms/machines/rubyusb/1005DL0L.BIO",
-                                     "roms/machines/rubyusb/1005DL0L.BI1",
-                                     "roms/machines/rubyusb/1005DL0L.BI2",
-                                     "roms/machines/rubyusb/1005DL0L.BI3",
-                                     "roms/machines/rubyusb/1005DL0L.RCV",
-                                     /*NULL,*/
-                                     0x3a000, 128);
+    ret = bios_load_intel("roms/machines/rubyusb/1005DL0L.BIO",
+                          "roms/machines/rubyusb/1005DL0L.RCV",
+                          262144, 1);
 
     if (bios_only || !ret)
         return ret;
@@ -314,16 +310,16 @@ int
 machine_at_cu430hx_init(const machine_t *model)
 {
     int         ret = 0;
-    const char *fn[5];
+    const char *fn[2];
 
     /* No ROMs available */
     if (!device_available(model->device))
         return ret;
 
     device_context(model->device);
-    for (int i = 0; i < 5; i++)
-        fn[i] = device_get_bios_file(machine_get_device(machine), device_get_config_bios("bios"), i);
-    ret = bios_load_linear_combined2(fn[0], fn[1], fn[2], fn[3], fn[4], 0x3a000, 128);
+    for (int i = 0; i < 2; i++)
+        fn[i] = device_get_bios_file(machine_get_device(machine), device_get_config_bios("bios"), i * 4);
+    ret = bios_load_intel(fn[0], fn[1], 262144, 1);
     device_context_restore();
 
     machine_at_common_init(model);
@@ -341,6 +337,9 @@ machine_at_cu430hx_init(const machine_t *model)
 
     if ((sound_card_current[0] == SOUND_INTERNAL) && machine_get_snd_device(machine)->available())
         machine_snd = device_add(machine_get_snd_device(machine));
+
+    if ((net_cards_conf[0].device_num == NET_INTERNAL) && machine_get_net_device(machine))
+        device_add(machine_get_net_device(machine));
 
     device_add(&i430hx_device);
     device_add(&piix3_device);
@@ -362,6 +361,17 @@ static const device_config_t tc430hx_config[] = {
         .spinner        = { 0 },
         .selection      = { { 0 } },
         .bios           = {
+            {
+                .name          = "Intel AMIBIOS - Revision 1.00.02.DH05 (Micron Millennia LXA/ClientPro MTA)",
+                .internal_name = "millennialxa",
+                .bios_type     = BIOS_NORMAL,
+                .files_no      = 5,
+                .local         = 0,
+                .size          = 262144,
+                .files         = { "roms/machines/tc430hx/1002DH05.BIO", "roms/machines/tc430hx/1002DH05.BI1",
+                                   "roms/machines/tc430hx/1002DH05.BI2", "roms/machines/tc430hx/1002DH05.BI3",
+                                   "roms/machines/tc430hx/1002DH05.RCV", "" }
+            },
             {
                 .name          = "Intel AMIBIOS - Revision 1.00.07.DH0",
                 .internal_name = "tc430hx",
@@ -440,16 +450,16 @@ int
 machine_at_tc430hx_init(const machine_t *model)
 {
     int         ret = 0;
-    const char *fn[5];
+    const char *fn[2];
 
     /* No ROMs available */
     if (!device_available(model->device))
         return ret;
 
     device_context(model->device);
-    for (int i = 0; i < 5; i++)
-        fn[i] = device_get_bios_file(machine_get_device(machine), device_get_config_bios("bios"), i);
-    ret = bios_load_linear_combined2(fn[0], fn[1], fn[2], fn[3], fn[4], 0x3a000, 128);
+    for (int i = 0; i < 2; i++)
+        fn[i] = device_get_bios_file(machine_get_device(machine), device_get_config_bios("bios"), i * 4);
+    ret = bios_load_intel(fn[0], fn[1], 262144, 1);
     device_context_restore();
 
     machine_at_common_init(model);
@@ -602,12 +612,9 @@ machine_at_pcv90_init(const machine_t *model)
 {
     int ret;
 
-    ret = bios_load_linear_combined2("roms/machines/pcv90/1010DD04.BIO",
-                                     "roms/machines/pcv90/1010DD04.BI1",
-                                     "roms/machines/pcv90/1010DD04.BI2",
-                                     "roms/machines/pcv90/1010DD04.BI3",
-                                     "roms/machines/pcv90/1010DD04.RCV",
-                                     0x3a000, 128);
+    ret = bios_load_intel("roms/machines/pcv90/1010DD04.BIO",
+                          "roms/machines/pcv90/1010DD04.RCV",
+                          262144, 1);
 
     if (bios_only || !ret)
         return ret;
@@ -694,7 +701,7 @@ machine_at_ap5vm_init(const machine_t *model)
     device_add(&piix3_device);
     device_add_params(machine_get_kbc_device(machine), (void *) model->kbc_params);
     device_add_params(&fdc37c6xx_device, (void *) FDC37C665);
-    device_add(&ncr53c810_onboard_pci_device);
+    device_add(machine_get_scsi_device(machine));
     device_add(&intel_flash_bxt_device);
 
     return ret;
@@ -860,12 +867,9 @@ machine_at_dellhannibalp_init(const machine_t *model)
 {
     int ret;
 
-    ret = bios_load_linear_combined2("roms/machines/dellhannibalp/1003DY0J.BIO",
-                                     "roms/machines/dellhannibalp/1003DY0J.BI1",
-                                     "roms/machines/dellhannibalp/1003DY0J.BI2",
-                                     "roms/machines/dellhannibalp/1003DY0J.BI3",
-                                     "roms/machines/dellhannibalp/1003DY0J.RCV",
-                                     0x3a000, 128);
+    ret = bios_load_intel("roms/machines/dellhannibalp/1003DY0J.BIO",
+                          "roms/machines/dellhannibalp/1003DY0J.RCV",
+                          262144, 1);
 
     if (bios_only || !ret)
         return ret;
@@ -902,7 +906,7 @@ static const device_config_t p5vxb_config[] = {
         .selection      = { { 0 } },
         .bios           = {
             {
-                .name          = "Award Modular BIOS v4.50PG - Revision 1.0",
+                .name          = "AwardBIOS v4.50PG - Revision 1.0",
                 .internal_name = "p5vxb",
                 .bios_type     = BIOS_NORMAL,
                 .files_no      = 1,
@@ -911,7 +915,7 @@ static const device_config_t p5vxb_config[] = {
                 .files         = { "roms/machines/p5vxb/P5VXB10.BIN", "" }
             },
             {
-                .name          = "Award Modular BIOS v4.51PG - Revision 1.5c",
+                .name          = "AwardBIOS v4.51PG - Revision 1.5c",
                 .internal_name = "p5vxb_451pg",
                 .bios_type     = BIOS_NORMAL,
                 .files_no      = 1,
@@ -1008,12 +1012,9 @@ machine_at_gw2kte_init(const machine_t *model)
 {
     int ret;
 
-    ret = bios_load_linear_combined2("roms/machines/gw2kte/1008CY1T.BIO",
-                                     "roms/machines/gw2kte/1008CY1T.BI1",
-                                     "roms/machines/gw2kte/1008CY1T.BI2",
-                                     "roms/machines/gw2kte/1008CY1T.BI3",
-                                     "roms/machines/gw2kte/1008CY1T.RCV",
-                                     0x3a000, 128);
+    ret = bios_load_intel("roms/machines/gw2kte/1008CY1T.BIO",
+                          "roms/machines/gw2kte/1008CY1T.RCV",
+                          262144, 1);
 
     if (bios_only || !ret)
         return ret;
@@ -1060,6 +1061,9 @@ machine_at_brio80xx_init(const machine_t *model)
     pci_register_slot(0x12, PCI_CARD_NORMAL,      2, 3, 4, 1);
     pci_register_slot(0x11, PCI_CARD_NORMAL,      3, 4, 1, 2);
     pci_register_slot(0x00, PCI_CARD_NORTHBRIDGE, 0, 0, 0, 0);
+
+    if (gfxcard[0] == VID_INTERNAL)
+        device_add(machine_get_vid_device(machine));
 
     device_add(&i430vx_device);
     device_add(&piix3_device);
@@ -1163,12 +1167,9 @@ machine_at_pb680_init(const machine_t *model)
 {
     int ret;
 
-    ret = bios_load_linear_combined2("roms/machines/pb680/1012DN0R.BIO",
-                                     "roms/machines/pb680/1012DN0R.BI1",
-                                     "roms/machines/pb680/1012DN0R.BI2",
-                                     "roms/machines/pb680/1012DN0R.BI3",
-                                     "roms/machines/pb680/1012DN0R.RCV",
-                                     0x3a000, 128);
+    ret = bios_load_intel("roms/machines/pb680/1012DN0R.BIO",
+                          "roms/machines/pb680/1012DN0R.RCV",
+                          262144, 1);
 
     if (bios_only || !ret)
         return ret;
@@ -1195,16 +1196,80 @@ machine_at_pb680_init(const machine_t *model)
     return ret;
 }
 
+static const device_config_t pb810_config[] = {
+    // clang-format off
+    {
+        .name           = "bios",
+        .description    = "BIOS Version",
+        .type           = CONFIG_BIOS,
+        .default_string = "pb810",
+        .default_int    = 0,
+        .file_filter    = NULL,
+        .spinner        = { 0 },
+        .selection      = { { 0 } },
+        .bios           = {
+            {
+                .name          = "AwardBIOS v4.51PG - Revision 3.00 (AST Bravo EL)",
+                .internal_name = "pb810_ast300",
+                .bios_type     = BIOS_NORMAL,
+                .files_no      = 1,
+                .local         = 0,
+                .size          = 131072,
+                .files         = { "roms/machines/pb810/JEWEL.BIN", "" }
+            },
+            {
+                .name          = "AwardBIOS v4.51PG - Revision 3.03 (AST Bravo EL)",
+                .internal_name = "pb810_ast",
+                .bios_type     = BIOS_NORMAL,
+                .files_no      = 1,
+                .local         = 0,
+                .size          = 131072,
+                .files         = { "roms/machines/pb810/2a59gjew.bin", "" }
+            },
+            {
+                .name          = "AwardBIOS v4.51PG - Revision 1.25I (Packard Bell PB810)",
+                .internal_name = "pb810",
+                .bios_type     = BIOS_NORMAL,
+                .files_no      = 1,
+                .local         = 0,
+                .size          = 131072,
+                .files         = { "roms/machines/pb810/G400125I.BIN", "" }
+            },
+            { .files_no = 0 }
+        }
+    },
+    { .name = "", .description = "", .type = CONFIG_END }
+    // clang-format on
+};
+
+const device_t pb810_device = {
+    .name          = "BCM FM530",
+    .internal_name = "pb810",
+    .flags         = 0,
+    .local         = 0,
+    .init          = NULL,
+    .close         = NULL,
+    .reset         = NULL,
+    .available     = NULL,
+    .speed_changed = NULL,
+    .force_redraw  = NULL,
+    .config        = pb810_config
+};
+
 int
 machine_at_pb810_init(const machine_t *model)
 {
-    int ret;
+    int         ret = 0;
+    const char *fn;
 
-    ret = bios_load_linear("roms/machines/pb810/G400125I.BIN",
-                           0x000e0000, 131072, 0);
-
-    if (bios_only || !ret)
+    /* No ROMs available */
+    if (!device_available(model->device))
         return ret;
+
+    device_context(model->device);
+    fn  = device_get_bios_file(machine_get_device(machine), device_get_config_bios("bios"), 0);
+    ret = bios_load_linear(fn, 0x000e0000, 131072, 0);
+    device_context_restore();
 
     machine_at_common_init(model);
 
@@ -1212,8 +1277,11 @@ machine_at_pb810_init(const machine_t *model)
     pci_register_slot(0x00, PCI_CARD_NORTHBRIDGE, 0, 0, 0, 0);
     pci_register_slot(0x13, PCI_CARD_NORMAL,      2, 1, 3, 4);
     pci_register_slot(0x11, PCI_CARD_NORMAL,      1, 3, 2, 4);
-    pci_register_slot(0x0b, PCI_CARD_NORMAL,      1, 2, 3, 4);
+    pci_register_slot(0x0b, PCI_CARD_VIDEO,       1, 2, 3, 4);
     pci_register_slot(0x07, PCI_CARD_SOUTHBRIDGE, 0, 0, 0, 0);
+
+    if (gfxcard[0] == VID_INTERNAL)
+        device_add(machine_get_vid_device(machine));
 
     if (sound_card_current[0] == SOUND_INTERNAL)
         machine_snd = device_add(machine_get_snd_device(machine));
@@ -1324,6 +1392,9 @@ machine_at_nupro592_init(const machine_t *model)
     hwm_values.fans[2]         = 0; /* unused */
     /* -5V is not reported by the BIOS, but leave it set */
 
+    if ((net_cards_conf[0].device_num == NET_INTERNAL) && machine_get_net_device(machine))
+        device_add(machine_get_net_device(machine));
+
     return ret;
 }
 
@@ -1380,7 +1451,7 @@ static const device_config_t txp4x_config[] = {
         .selection      = { { 0 } },
         .bios           = {
             {
-                .name          = "Award Modular BIOS v4.51PG - Revision 0108el",
+                .name          = "AwardBIOS v4.51PG - Revision 0108el",
                 .internal_name = "txp4x_aw0108",
                 .bios_type     = BIOS_NORMAL,
                 .files_no      = 1,
@@ -1389,7 +1460,7 @@ static const device_config_t txp4x_config[] = {
                 .files         = { "roms/machines/txp4x/XE5L0108.AWD", "" }
             },
             {
-                .name          = "Award Modular BIOS v4.51PG - Revision 0112el-1 (Patched)",
+                .name          = "AwardBIOS v4.51PG - Revision 0112el-1 (Patched)",
                 .internal_name = "txp4x",
                 .bios_type     = BIOS_NORMAL,
                 .files_no      = 1,
@@ -1445,13 +1516,13 @@ machine_at_txp4x_init(const machine_t *model)
     machine_at_common_init(model);
 
     pci_init(PCI_CONFIG_TYPE_1);
+    /* Four slots, as in the BIOS's $PIR table: slot 1 is device 0Ch, slot 4 is 09h.
+       Devices 08h and 0Dh are not slots -- the 0112 BIOS gives them no IRQ. */
     pci_register_slot(0x00, PCI_CARD_NORTHBRIDGE, 0, 0, 0, 0);
-    pci_register_slot(0x08, PCI_CARD_NORMAL,      1, 2, 3, 4); /* unused? */
-    pci_register_slot(0x09, PCI_CARD_NORMAL,      4, 1, 2, 3);
-    pci_register_slot(0x0A, PCI_CARD_NORMAL,      3, 4, 1, 2);
-    pci_register_slot(0x0B, PCI_CARD_NORMAL,      2, 3, 4, 1);
     pci_register_slot(0x0C, PCI_CARD_NORMAL,      1, 2, 3, 4);
-    pci_register_slot(0x0D, PCI_CARD_NORMAL,      1, 2, 3, 4); /* unused? */
+    pci_register_slot(0x0B, PCI_CARD_NORMAL,      2, 3, 4, 1);
+    pci_register_slot(0x0A, PCI_CARD_NORMAL,      3, 4, 1, 2);
+    pci_register_slot(0x09, PCI_CARD_NORMAL,      4, 1, 2, 3);
     pci_register_slot(0x01, PCI_CARD_SOUTHBRIDGE, 1, 2, 3, 4);
 
     device_add(&i430tx_device);
@@ -1469,6 +1540,92 @@ machine_at_txp4x_init(const machine_t *model)
        Either way, doesn't hurt to have it as an option in the emulator. */
     if (sound_card_current[0] == SOUND_INTERNAL)
         machine_snd = device_add(machine_get_snd_device(machine));
+
+    return ret;
+}
+
+static const device_config_t awardeval_config[] = {
+    // clang-format off
+    {
+        .name           = "bios",
+        .description    = "BIOS Version",
+        .type           = CONFIG_BIOS,
+        .default_string = "awardeval",
+        .default_int    = 0,
+        .file_filter    = NULL,
+        .spinner        = { 0 },
+        .selection      = { { 0 } },
+        .bios           = {
+            {
+                .name          = "AwardBIOS v4.51PG (v6.00PG Beta) - Revision 11/21/97",
+                .internal_name = "awardeval_112197",
+                .bios_type     = BIOS_NORMAL,
+                .files_no      = 1,
+                .local         = 0,
+                .size          = 131072,
+                .files         = { "roms/machines/awardeval/2a59ie39.bin", "" }
+            },
+            {
+                .name          = "AwardBIOS v4.51PG (v6.00PG Beta) - Revision 01/11/98",
+                .internal_name = "awardeval",
+                .bios_type     = BIOS_NORMAL,
+                .files_no      = 1,
+                .local         = 0,
+                .size          = 131072,
+                .files         = { "roms/machines/awardeval/test.bin", "" }
+            },
+            { .files_no = 0 }
+        }
+    },
+    { .name = "", .description = "", .type = CONFIG_END }
+    // clang-format on
+};
+
+const device_t awardeval_device = {
+    .name          = "AwardBIOS v6.00PG Beta Evaluation Board",
+    .internal_name = "awardeval",
+    .flags         = 0,
+    .local         = 0,
+    .init          = NULL,
+    .close         = NULL,
+    .reset         = NULL,
+    .available     = NULL,
+    .speed_changed = NULL,
+    .force_redraw  = NULL,
+    .config        = awardeval_config
+};
+
+int
+machine_at_awardeval_init(const machine_t *model)
+{
+    int         ret = 0;
+    const char *fn;
+
+    /* No ROMs available */
+    if (!device_available(model->device))
+        return ret;
+
+    device_context(model->device);
+    fn  = device_get_bios_file(machine_get_device(machine), device_get_config_bios("bios"), 0);
+    ret = bios_load_linear(fn, 0x000e0000, 131072, 0);
+    device_context_restore();
+
+    machine_at_common_init(model);
+
+    pci_init(PCI_CONFIG_TYPE_1);
+    pci_register_slot(0x00, PCI_CARD_NORTHBRIDGE, 0, 0, 0, 0);
+    pci_register_slot(0x11, PCI_CARD_NORMAL,      1, 2, 3, 4);
+    pci_register_slot(0x12, PCI_CARD_NORMAL,      2, 3, 4, 1);
+    pci_register_slot(0x13, PCI_CARD_NORMAL,      3, 4, 1, 2);
+    pci_register_slot(0x14, PCI_CARD_NORMAL,      4, 1, 2, 3);
+    pci_register_slot(0x01, PCI_CARD_SOUTHBRIDGE, 1, 2, 3, 4);
+
+    device_add(&i430tx_device);
+    device_add(&piix4_device);
+    device_add_params(machine_get_kbc_device(machine), (void *) model->kbc_params);
+    device_add_params(&w83877_device, (void *) (W83877F | W83877_3F0));
+    device_add(&sst_flash_29ee010_device);
+    spd_register(SPD_TYPE_SDRAM, 0x3, 128);
 
     return ret;
 }
@@ -1712,7 +1869,7 @@ static const device_config_t ms5156_config[] = {
                 .files         = { "roms/machines/ms5156/A556C313.ROM", "" }
             },
             {
-                .name          = "Award Modular BIOS v4.51PG - Revision 1.5",
+                .name          = "AwardBIOS v4.51PG - Revision 1.5",
                 .internal_name = "ms5156w",
                 .bios_type     = BIOS_NORMAL,
                 .files_no      = 1,
@@ -1721,7 +1878,7 @@ static const device_config_t ms5156_config[] = {
                 .files         = { "roms/machines/ms5156/W556MS15.BIN", "" }
             },
             {
-                .name          = "Award Modular BIOS v4.51PG - Revision 1.6B1 (ACPI Beta)",
+                .name          = "AwardBIOS v4.51PG - Revision 1.6B1 (ACPI Beta)",
                 .internal_name = "ms5156wab",
                 .bios_type     = BIOS_NORMAL,
                 .files_no      = 1,
@@ -1846,8 +2003,19 @@ static const device_config_t an430tx_config[] = {
                                    "roms/machines/an430tx/P02-0011.RCV", "" }
             },
             {
+                .name          = "PhoenixBIOS 4.0 Release 6.0 - Revision P07-0024 (Micron Millennia MME)",
+                .internal_name = "millenniamme",
+                .bios_type     = BIOS_NORMAL,
+                .files_no      = 5,
+                .local         = 0,
+                .size          = 262144,
+                .files         = { "roms/machines/an430tx/P07-0024.BIO", "roms/machines/an430tx/P07-0024.BI1",
+                                   "roms/machines/an430tx/P07-0024.BI2", "roms/machines/an430tx/P07-0024.BI3",
+                                   "roms/machines/an430tx/P07-0024.RCV", "" }
+            },
+            {
                 .name          = "PhoenixBIOS 4.0 Release 6.0 - Revision P09-0006 (Packard Bell PB79x)",
-                .internal_name = "an430tx",
+                .internal_name = "pb79x",
                 .bios_type     = BIOS_NORMAL,
                 .files_no      = 5,
                 .local         = 0,
@@ -1855,6 +2023,17 @@ static const device_config_t an430tx_config[] = {
                 .files         = { "roms/machines/an430tx/ANP0911A.BIO", "roms/machines/an430tx/ANP0911A.BI1",
                                    "roms/machines/an430tx/ANP0911A.BI2", "roms/machines/an430tx/ANP0911A.BI3",
                                    "roms/machines/an430tx/ANP0911A.RCV", "" }
+            },
+            {
+                .name          = "PhoenixBIOS 4.0 Release 6.0 - Revision P10-0095",
+                .internal_name = "an430tx",
+                .bios_type     = BIOS_NORMAL,
+                .files_no      = 5,
+                .local         = 0,
+                .size          = 262144,
+                .files         = { "roms/machines/an430tx/P10-0095.BIO", "roms/machines/an430tx/P10-0095.BI1",
+                                   "roms/machines/an430tx/P10-0095.BI2", "roms/machines/an430tx/P10-0095.BI3",
+                                   "roms/machines/an430tx/P10-0095.RCV", "" }
             },
             { .files_no = 0 }
         }
@@ -1881,16 +2060,16 @@ int
 machine_at_an430tx_init(const machine_t *model)
 {
     int ret = 0;
-    const char* fn[5];
+    const char* fn[2];
 
     /* No ROMs available */
     if (!device_available(model->device))
         return ret;
 
     device_context(model->device);
-    for (int i = 0; i < 5; i++)
-        fn[i] = device_get_bios_file(machine_get_device(machine), device_get_config_bios("bios"), i);
-    ret = bios_load_linear_combined2(fn[0], fn[1], fn[2], fn[3], fn[4], 0x3a000, 160);
+    for (int i = 0; i < 2; i++)
+        fn[i] = device_get_bios_file(machine_get_device(machine), device_get_config_bios("bios"), i * 4);
+    ret = bios_load_intel(fn[0], fn[1], 262144, 1);
     device_context_restore();
 
     machine_at_common_init(model);
@@ -1915,6 +2094,9 @@ machine_at_an430tx_init(const machine_t *model)
     device_add(&intel_flash_bxt_ami_device);
     spd_register(SPD_TYPE_SDRAM, 0x3, 128);
 
+    if (gfxcard[0] == VID_INTERNAL)
+        device_add(machine_get_vid_device(machine));
+
     if (sound_card_current[0] == SOUND_INTERNAL)
         machine_snd = device_add(machine_get_snd_device(machine));
 
@@ -1936,10 +2118,10 @@ machine_at_mb540n_init(const machine_t *model)
 
     pci_init(PCI_CONFIG_TYPE_1);
     pci_register_slot(0x00, PCI_CARD_NORTHBRIDGE, 0, 0, 0, 0);
-    pci_register_slot(0x11, PCI_CARD_NORMAL,      4, 1, 2, 3);
-    pci_register_slot(0x12, PCI_CARD_NORMAL,      3, 4, 1, 2);
-    pci_register_slot(0x13, PCI_CARD_NORMAL,      2, 3, 4, 1);
     pci_register_slot(0x14, PCI_CARD_NORMAL,      1, 2, 3, 4);
+    pci_register_slot(0x13, PCI_CARD_NORMAL,      2, 3, 4, 1);
+    pci_register_slot(0x12, PCI_CARD_NORMAL,      3, 4, 1, 2);
+    pci_register_slot(0x11, PCI_CARD_NORMAL,      4, 1, 2, 3);
     pci_register_slot(0x07, PCI_CARD_SOUTHBRIDGE, 1, 2, 3, 4); /* PIIX4 */
 
     device_add(&i430tx_device);
@@ -2040,7 +2222,6 @@ machine_at_richmond_init(const machine_t *model)
 
     device_add(&i430tx_device);
     device_add(&piix4_device);
-    device_add_params(machine_get_kbc_device(machine), (void *) model->kbc_params);
     device_add(&it8671f_device);
     device_add(&intel_flash_bxt_device);
     spd_register(SPD_TYPE_SDRAM, 0x3, 128);
@@ -2226,7 +2407,7 @@ static const device_config_t ms5146_config[] = {
                 .files         = { "roms/machines/ms5146/A546MS11.ROM", "" }
             },
             {
-                .name          = "Award Modular BIOS v4.51PG - Revision 2.1",
+                .name          = "AwardBIOS v4.51PG - Revision 2.1",
                 .internal_name = "ms5146_451pg",
                 .bios_type     = BIOS_NORMAL,
                 .files_no      = 1,
@@ -2300,7 +2481,7 @@ static const device_config_t r534f_config[] = {
         .selection      = { { 0 } },
         .bios           = {
             {
-                .name          = "Award Modular BIOS v4.51PG - Revision 06/12/1998",
+                .name          = "AwardBIOS v4.51PG - Revision 06/12/1998",
                 .internal_name = "r534f_1998",
                 .bios_type     = BIOS_NORMAL,
                 .files_no      = 1,
@@ -2309,7 +2490,7 @@ static const device_config_t r534f_config[] = {
                 .files         = { "roms/machines/r534f/r534f008-1998.bin", "" }
             },
             {
-                .name          = "Award Modular BIOS v4.51PG - Revision 03/13/2000 (by Unicore Software)",
+                .name          = "AwardBIOS v4.51PG - Revision 03/13/2000 (by Unicore Software)",
                 .internal_name = "r534f",
                 .bios_type     = BIOS_NORMAL,
                 .files_no      = 1,
@@ -2470,7 +2651,7 @@ static const device_config_t m5ata_config[] = {
         .selection      = { { 0 } },
         .bios           = {
             {
-                .name          = "Award Modular BIOS v4.51PG - Revision 12/23/97",
+                .name          = "AwardBIOS v4.51PG - Revision 12/23/97",
                 .internal_name = "m5ata_1223",
                 .bios_type     = BIOS_NORMAL,
                 .files_no      = 1,
@@ -2479,7 +2660,7 @@ static const device_config_t m5ata_config[] = {
                 .files         = { "roms/machines/m5ata/ATA1223.BIN", "" }
             },
             {
-                .name          = "Award Modular BIOS v4.51PG - Revision 05/27/98",
+                .name          = "AwardBIOS v4.51PG - Revision 05/27/98",
                 .internal_name = "m5ata",
                 .bios_type     = BIOS_NORMAL,
                 .files_no      = 1,
@@ -2600,6 +2781,35 @@ machine_at_m560_init(const machine_t *model)
 
     device_add(&ali1531_device);
     device_add(&ali1543_device); /* -5 */
+    device_add(&sst_flash_29ee010_device);
+    spd_register(SPD_TYPE_SDRAM, 0x3, 256);
+
+    return ret;
+}
+
+/* Utron UT85C50x */
+int
+machine_at_m558_init(const machine_t *model)
+{
+    int ret;
+
+    ret = bios_load_linear("roms/machines/m558/5581108S.ROM",
+                           0x000e0000, 131072, 0);
+
+    if (bios_only || !ret)
+        return ret;
+
+    machine_at_common_init(model);
+
+    pci_init(PCI_CONFIG_TYPE_1);
+    pci_register_slot(0x05, PCI_CARD_NORTHBRIDGE,     0, 0, 0, 0);
+    pci_register_slot(0x08, PCI_CARD_NORMAL,          2, 3, 4, 1);
+    pci_register_slot(0x09, PCI_CARD_NORMAL,          3, 4, 1, 2);
+    pci_register_slot(0x0A, PCI_CARD_NORMAL,          4, 1, 2, 3);
+    pci_register_slot(0x0B, PCI_CARD_NORMAL,          1, 2, 3, 4);
+    
+    device_add(&ut85c50x_device);
+    device_add_params(&um866x_device, (void *) UM8663BF); //Actual super I/O is UM8670F
     device_add(&sst_flash_29ee010_device);
     spd_register(SPD_TYPE_SDRAM, 0x3, 256);
 

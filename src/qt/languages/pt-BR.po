@@ -1,6 +1,6 @@
 msgid ""
 msgstr ""
-"PO-Revision-Date: 2026-06-15 21:21+0000\n"
+"PO-Revision-Date: 2026-10-16 16:24+0000\n"
 "Last-Translator: Nelson Kerber Hennemann Filho <nelsonhf@outlook.com>\n"
 "Language-Team: Portuguese (Brazil) <https://weblate.86box.net/projects/86box/"
 "86box/pt_BR/>\n"
@@ -17,7 +17,7 @@ msgid "&Action"
 msgstr "&Ação"
 
 msgid "&Keyboard requires capture"
-msgstr "O &teclado requer captura"
+msgstr "O teclado requer capt&ura"
 
 msgid "&Right CTRL is left ALT"
 msgstr "CTR&L direito é o ALT esquerdo"
@@ -26,7 +26,7 @@ msgid "&Hard reset"
 msgstr "&Reinicialização completa"
 
 msgid "&Ctrl+Alt+Del"
-msgstr "Ctrl+Alt+&Del"
+msgstr "&Ctrl+Alt+Del"
 
 msgid "Ctrl+Alt+&Esc"
 msgstr "Ctrl+Alt+&Esc"
@@ -67,17 +67,23 @@ msgstr "&Renderizador"
 msgid "&Qt (Software)"
 msgstr "&Qt (Software)"
 
-msgid "Open&GL (3.0 Core)"
-msgstr "Open&GL (Núcleo 3.0)"
+msgid "Open&GL"
+msgstr "Open&GL"
 
-msgid "&VNC"
-msgstr "&VNC"
+msgid "&Vulkan"
+msgstr "&Vulkan"
+
+msgid "V&NC"
+msgstr "V&NC"
 
 msgid "Specify &dimensions…"
 msgstr "Especificar as dime&nsões…"
 
 msgid "Force &4:3 display ratio"
 msgstr "Forçar proporção de tela em &4:3"
+
+msgid "Force &%1:%2 display ratio"
+msgstr "Forçar proporção de tela em &%1:%2"
 
 msgid "&Window scale factor"
 msgstr "F&ator de redimensionamento da janela"
@@ -421,8 +427,11 @@ msgstr "Ativar (UTC)"
 msgid "Use the 486 interpreter for 286 and 386 processors"
 msgstr "Usar o interpretador 486 para processadores 286 e 386"
 
-msgid "Dynamic Recompiler"
+msgid "Dynamic recompiler"
 msgstr "Recompilador dinâmico"
+
+msgid "Accurate FPU environment on the dynamic recompiler"
+msgstr "Ambiente FPU preciso no recompilador dinâmico"
 
 msgid "CPU frame size"
 msgstr "Tamanho do quadro da CPU"
@@ -454,6 +463,9 @@ msgstr "Gráficos XGA"
 msgid "IBM PS/55 Display Adapter Graphics"
 msgstr "Gráficos do Adaptador de Vídeo IBM PS/55"
 
+msgid "SCSI:"
+msgstr "SCSI:"
+
 msgid "Voodoo:"
 msgstr "Voodoo:"
 
@@ -468,6 +480,21 @@ msgstr "Mouse:"
 
 msgid "Mouse"
 msgstr "Mouse"
+
+msgid "&Mouse"
+msgstr "&Mouse"
+
+msgid "Tablet:"
+msgstr "Tablet:"
+
+msgid "Tablet"
+msgstr "Tablet"
+
+msgid "&Tablet"
+msgstr "&Tablet"
+
+msgid "Tablet (&Crosshair)"
+msgstr "Tablet (&Cruz)"
 
 msgid "Joystick:"
 msgstr "Joystick:"
@@ -797,10 +824,10 @@ msgid "Turbo"
 msgstr "Turbo"
 
 msgid "On"
-msgstr "Lig."
+msgstr "Ligado"
 
 msgid "Off"
-msgstr "Desl."
+msgstr "Desligado"
 
 msgid "All images"
 msgstr "Todas as imagens"
@@ -829,6 +856,9 @@ msgstr "Vídeo"
 msgid "Input devices"
 msgstr "Dispositivos de entrada"
 
+msgid "Input &device"
+msgstr "D&ispositivo de entrada"
+
 msgid "Sound"
 msgstr "Som"
 
@@ -837,6 +867,9 @@ msgstr "Rede"
 
 msgid "Ports (COM & LPT)"
 msgstr "Portas (COM & LPT)"
+
+msgid "Port"
+msgstr "Porta"
 
 msgid "Ports"
 msgstr "Portas"
@@ -912,6 +945,9 @@ msgstr "Aperte %1 para liberar o mouse"
 
 msgid "Press %1 or middle button to release mouse"
 msgstr "Aperte %1 ou botão do meio para liberar o mouse"
+
+msgid "Press %1 or side button to release mouse"
+msgstr "Aperte %1 ou botão lateral para liberar o mouse"
 
 msgid "Bus"
 msgstr "Barramento"
@@ -1239,6 +1275,9 @@ msgstr "Não foi possível abrir o arquivo de configuração selecionado para le
 msgid "Use regular expressions in search box"
 msgstr "Usar expressões regulares na caixa de pesquisa"
 
+msgid "Delete virtual machines to Recycle Bin"
+msgstr "Excluir máquinas virtuais para a Lixeira"
+
 msgid "%n machine(s) are currently active. Are you sure you want to exit the VM manager anyway?"
 msgid_plural "%n machines are currently active. Are you sure you want to exit the VM manager anyway?"
 msgstr[0] "%n máquina está ativa no momento. Tem certeza de que deseja sair do gerenciador de MVs mesmo assim?"
@@ -1412,8 +1451,11 @@ msgstr "Forçar o encerramento de uma máquina virtual pode causar perda de dado
 msgid "&Delete"
 msgstr "&Apagar"
 
-msgid "Do you really want to delete the virtual machine \"%1\" and all its files? This action cannot be undone!"
-msgstr "Deseja realmente apagar a máquina virtual \"%1\" e todos os seus arquivos? Essa ação não pode ser desfeita!"
+msgid "Do you really want to delete the virtual machine \"%1\" and all its files?"
+msgstr "Deseja realmente apagar a máquina virtual \"%1\" e todos os seus arquivos?"
+
+msgid "This action cannot be undone!"
+msgstr "Essa ação não pode ser desfeita!"
 
 msgid "Show &config file"
 msgstr "Mostrar arquivo de &configuração"
@@ -1453,6 +1495,18 @@ msgstr "Desligamento por ACPI"
 
 msgid "ACP&I shutdown"
 msgstr "Desligamento por ACP&I"
+
+msgid "Power off"
+msgstr "Desligar"
+
+msgid "Power &off…"
+msgstr "&Desligar…"
+
+msgid "Power &off"
+msgstr "&Desligar"
+
+msgid "Powering off the emulated machine may cause data loss. Are you sure you want to continue?"
+msgstr "Desligar a máquina virtual pode causar perda de dados. Você tem certeza que deseja continuar?"
 
 msgid "Hard disk (%1)"
 msgstr "Disco rígido (%1)"
@@ -1776,7 +1830,7 @@ msgid "&Pen"
 msgstr "C&aneta"
 
 msgid "&Host CD/DVD Drive (%1)"
-msgstr "&Unidade de CD/DVD do anfitrião (%1)"
+msgstr "&Unidade de CD/DVD do hospedeiro (%1)"
 
 msgid "&Connected"
 msgstr "&Conectado"
@@ -1788,7 +1842,7 @@ msgid "Create…"
 msgstr "Criar…"
 
 msgid "Host CD/DVD Drive (%1)"
-msgstr "Unidade de CD/DVD do anfitrião (%1)"
+msgstr "Unidade de CD/DVD do hospedeiro (%1)"
 
 msgid "Unknown Bus"
 msgstr "Barramento desconhecido"
@@ -2232,7 +2286,10 @@ msgid "Serial Number"
 msgstr "Número de série"
 
 msgid "Host ID"
-msgstr "ID do anfitrião"
+msgstr "ID do hospedeiro"
+
+msgid "Host"
+msgstr "Hospedeiro"
 
 msgid "FDC Address"
 msgstr "Endereço da FDC"
@@ -2663,6 +2720,18 @@ msgstr "Colorido aprimorado - Modo normal (5154/ECD)"
 msgid "Enhanced Color - Enhanced Mode (5154/ECD)"
 msgstr "Colorido aprimorado - Modo aprimorado (5154/ECD)"
 
+msgid "IBM 8507 (1024x768, Monochrome)"
+msgstr "IBM 8507 (1024x768, monocromático)"
+
+msgid "IBM 8514 (1024x768, Color)"
+msgstr "IBM 8514 (1024x768, colorido)"
+
+msgid "IBM 8503 (640x480, Monochrome)"
+msgstr "IBM 8503 (640x480, monocromático)"
+
+msgid "IBM 8512/13 (640x480, Color)"
+msgstr "IBM 8512/13 (640x480, colorido)"
+
 msgid "Green"
 msgstr "Verde"
 
@@ -2763,7 +2832,7 @@ msgid "Serial Passthrough"
 msgstr "Passagem de porta serial"
 
 msgid "Host serial device"
-msgstr "Dispositivo serial host"
+msgstr "Dispositivo serial no hospedeiro"
 
 msgid "Named Pipe"
 msgstr "Pipe nomeado"
@@ -2861,8 +2930,14 @@ msgstr "[Genérico] 1989 (3500 RPM)"
 msgid "[Generic] 1992 (3600 RPM)"
 msgstr "[Genérico] 1992 (3600 RPM)"
 
+msgid "[Generic] 1993 (4000 RPM)"
+msgstr "[Genérico] 1993 (4000 RPM)"
+
 msgid "[Generic] 1994 (4500 RPM)"
 msgstr "[Genérico] 1994 (4500 RPM)"
+
+msgid "[Generic] 1995 (5200 RPM)"
+msgstr "[Genérico] 1995 (5200 RPM)"
 
 msgid "[Generic] 1996 (5400 RPM)"
 msgstr "[Genérico] 1996 (5400 RPM)"
@@ -2875,6 +2950,9 @@ msgstr "[Genérico] 1998 (5400 RPM)"
 
 msgid "[Generic] 2000 (7200 RPM)"
 msgstr "[Genérico] 2000 (7200 RPM)"
+
+msgid "[Generic] 2004 (10000 RPM)"
+msgstr "[Genérico] 2004 (10000 RPM)"
 
 msgid "IBM 8514/A clone"
 msgstr "Clone IBM 8514/A"
@@ -2915,6 +2993,9 @@ msgstr "Perguntar antes de reinicialização completa"
 msgid "Ask for confirmation before quitting"
 msgstr "Perguntar antes de sair"
 
+msgid "Precache CHD files into memory"
+msgstr "Pré-carregar arquivos CHD na memória"
+
 msgid "Options"
 msgstr "Opções"
 
@@ -2924,8 +3005,35 @@ msgstr "Modelo"
 msgid "Model:"
 msgstr "Modelo:"
 
+msgid "Brand:"
+msgstr "Marca:"
+
+msgid "Revision:"
+msgstr "Revisão:"
+
+msgid "[Generic HDD] Device Configuration"
+msgstr "Configuração do dispositivo [HDD Genérico]"
+
 msgid "Failed to initialize Vulkan renderer."
 msgstr "Falha ao inicializar o renderizador Vulkan."
+
+msgid "Failed to create Vulkan 1.3 instance."
+msgstr "Falha ao criar instância Vulkan 1.3."
+
+msgid "No usable Vulkan physical devices found."
+msgstr "Nenhum dispositivo Vulkan utilizável encontrado."
+
+msgid "No Vulkan-capable physical devices found."
+msgstr "Nenhum dispositivo físico compatível com Vulkan encontrado."
+
+msgid "librashader not found. Shaders will not be available."
+msgstr "librashader não encontrada. Shaders não estarão disponíveis."
+
+msgid "Vulkan device lost."
+msgstr "Dispositivo Vulkan perdido."
+
+msgid "Vulkan surface lost."
+msgstr "Superfície Vulkan perdida."
 
 msgid "GLSL Error"
 msgstr "Erro GLSL"
@@ -2947,6 +3055,9 @@ msgstr "Gerenciador de Shaders"
 
 msgid "Shader Configuration"
 msgstr "Configuração de Shaders"
+
+msgid "GPU:"
+msgstr "GPU:"
 
 msgid "Add"
 msgstr "Adicionar"
@@ -3042,7 +3153,7 @@ msgid "Hub Mode"
 msgstr "Modo Hub"
 
 msgid "Hostname:"
-msgstr "Nome do anfitrião:"
+msgstr "Nome do hospedeiro:"
 
 msgid "ISA RAM:"
 msgstr "RAM ISA:"
@@ -3149,7 +3260,7 @@ msgid "The system will not be added."
 msgstr "O sistema não será adicionado."
 
 msgid "&Update mouse every CPU frame"
-msgstr "&Atualiza o estado do mouse em cada quadro da CPU"
+msgstr "Atualiza o estado do &mouse em cada quadro da CPU"
 
 msgid "Hue"
 msgstr "Matiz"
@@ -3220,6 +3331,12 @@ msgstr "&Avançar rapidamente"
 msgid "Fast forward"
 msgstr "Avançar rapidamente"
 
+msgid "&Non-maskable interrupt"
+msgstr "Interrupção &não-mascarável"
+
+msgid "Non-maskable interrupt"
+msgstr "Interrupção não-mascarável"
+
 msgid "To change the system directory, stop all running machines."
 msgstr "Para alterar o diretório do sistema, pare todas as máquinas em funcionamento."
 
@@ -3251,6 +3368,11 @@ msgid "Unable to load image \"%s\": %1 is missing, which is required for Daemon 
 msgstr ""
 "Não foi possível carregar a imagem \"%s\": Falta %1, necessário para "
 "suporte a imagens Daemon Tools MDS v2 e MDX."
+
+msgid "Unable to load image \"%s\": %1 is missing, which is required for Aaru format image support."
+msgstr ""
+"Não foi possível carregar a imagem \"%s\": %1 está faltando, o que é "
+"necessário para suporte a imagens no formato Aaru."
 
 msgid "The DVD image \"%s\" has been inserted into a drive that does not support DVD media and will be ignored."
 msgstr ""
@@ -3397,3 +3519,114 @@ msgstr "938 (Chinês tradicional)"
 
 msgid "Sample rate:"
 msgstr "Taxa de amostragem:"
+
+msgid "Enable audio input (mic/line-in)"
+msgstr "Habilitar entrada de áudio (mic/line-in)"
+
+msgid "Audio input device:"
+msgstr "Dispositivo de entrada de áudio:"
+
+msgid "Audio input sample rate:"
+msgstr "Taxa de amostragem da entrada de áudio:"
+
+msgid "Rate the emulator mixes to the host output device."
+msgstr "Taxa que o emulador mixa para o dispositivo de saída de áudio."
+
+msgid "Rate the host input capture device is opened at.\n\n44100 divides evenly by SB16/AWE32 rates of 44.1/22/11 kHz."
+msgstr "Taxa que o dispositivo de captura de áudio é aberto no hospedeiro.\n\n44100 é divisível de forma exata pelas taxas de 44.1/22/11 kHz da SB16/AWE32."
+
+msgid "CGA lightpen"
+msgstr "Caneta óptica CGA"
+
+msgid "Luminance threshold (%)"
+msgstr "Limiar de luminância (%)"
+
+msgid "VFIO: Could not open /dev/vfio/vfio: %s. Make sure the vfio-pci module is loaded."
+msgstr ""
+"VFIO: Não foi possível abrir /dev/vfio/vfio: %s. Assegure que o módulo vfio-"
+"pci está carregado."
+
+msgid "VFIO %s: Invalid device location."
+msgstr "VFIO %s: Localização inválida do dispositivo."
+
+msgid "VFIO %s: Device not found."
+msgstr "VFIO %s: Dispositivo não encontrado."
+
+msgid "VFIO %s: Device has no IOMMU group. Make sure VT-d or IOMMU is enabled on your system."
+msgstr ""
+"VFIO %s: Dispositivo não tem grupo IOMMU. Assegure que o VT-d ou IOMMU "
+"esteja habilitado no seu sistema."
+
+msgid "VFIO %s: Device is not bound to vfio-pci."
+msgstr "VFIO %s: Dispositivo não está vinculado ao vfio-pci."
+
+msgid "VFIO %s: Could not open IOMMU group %d: %s"
+msgstr "VFIO %s: Não foi possível abrir o grupo IOMMU %d: %s"
+
+msgid "VFIO %s: IOMMU group %d is not viable. All devices in the group must be bound to vfio-pci."
+msgstr ""
+"VFIO %s: Grupo IOMMU %d não é viável. Todos os dispositivos no grupo devem "
+"estar vinculados ao vfio-pci."
+
+msgid "VFIO: Could not map guest memory for DMA: %s. The locked memory limit (ulimit -l) may be too low."
+msgstr ""
+"VFIO: Não foi possível mapear memória do convidado para DMA: %s. O limite de "
+"memória bloqueada (ulimit -l) pode ser muito baixo."
+
+msgid "VFIO %s: Could not read ROM file \"%s\"; using the device's own ROM."
+msgstr ""
+"VFIO %s: Não foi possível ler o arquivo ROM \"%s\"; usando a ROM própria do "
+"dispositivo."
+
+msgid "VFIO %s: Could not read ROM file \"%s\"; the ROM is disabled."
+msgstr ""
+"VFIO %s: Não foi possível ler o arquivo ROM \"%s\"; a ROM está desabilitada."
+
+msgid "VFIO %s: The ROM looks invalid. A custom ROM can be loaded through the VFIO settings."
+msgstr ""
+"VFIO %s: A ROM parece inválida. Uma ROM customizada pode ser carregada "
+"através das configurações VFIO."
+
+msgid "VFIO: These devices must be bound to vfio-pci, which requires administrator rights:\n\n%s\nBind them now?"
+msgstr ""
+"VFIO: Estes dispositivos precisam ser vinculados ao vfio-pci, o que requer "
+"privilégios de administrador:\n"
+"\n"
+"%s\n"
+"Vincular eles agora?"
+
+msgid "VFIO: Administrator rights are required to give 86Box access to the passed-through devices. Continue?"
+msgstr ""
+"VFIO: Privilégios de administrador são necessários para dar ao 86Box acesso "
+"aos dispositivos passados diretamente. Continuar?"
+
+msgid "These devices were not selected, but share an IOMMU group with a selected device, so they will be bound as well:"
+msgstr ""
+"Estes dispositivos não foram selecionados, mas compartilham um grupo IOMMU "
+"com um dispositivo selecionado, então eles serão vinculados também:"
+
+msgid "VFIO %s: IOMMU group %d also contains %s, which the host needs. The group will not be bound to vfio-pci."
+msgstr ""
+"VFIO %s: Grupo IOMMU %d também contém %s, o qual o host necessita. O grupo "
+"não será vinculado ao vfio-pci."
+
+msgid "VFIO: Could not prepare the devices for passthrough:\n%s"
+msgstr ""
+"VFIO: Não foi possível preparar os dispositivos para passagem:\n"
+"%s"
+
+msgid "VFIO: Administrator rights could not be requested. To prepare the devices for passthrough, run this command, then hard reset:\n\n%s"
+msgstr ""
+"VFIO: Privilégios de administrador não puderam ser requisitados. Para "
+"preparar os dispositivos para passagem, execute esse comando, então reinicie "
+"completamente:\n"
+"\n"
+"%s"
+
+msgid "Prepare PCI devices for VFIO passthrough"
+msgstr "Preparar dispositivos PCI para passagem VFIO"
+
+msgid "Authentication is required to prepare PCI devices for passthrough to 86Box."
+msgstr ""
+"Autenticação é necessária para preparar dispositivos PCI para passagem para "
+"o 86Box."

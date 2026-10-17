@@ -1,5 +1,6 @@
 #if defined __amd64__ || defined _M_X64
 
+#    include <inttypes.h>
 #    include <stdarg.h>
 #    include <stdio.h>
 #    include <string.h>
@@ -7,6 +8,7 @@
 #    include <stdlib.h>
 #    define HAVE_STDARG_H
 #    include <86box/86box.h>
+#    include <86box/pic.h>
 #    include <86box/plat.h>
 #    include "cpu.h"
 #    include "x86.h"
@@ -30,6 +32,9 @@ int      codegen_flat_ds;
 int      codegen_flat_ss;
 int      codegen_flags_changed = 0;
 int      codegen_fpu_entered   = 0;
+/* An interpreted instruction may have loaded another control word since the
+   block's start or the last check (codegen_fpu_class_check) */
+static int codegen_fpu_class_dirty = 0;
 int      codegen_fpu_loaded_iq[8];
 int      codegen_reg_loaded[8];
 x86seg  *op_ea_seg;
@@ -49,6 +54,8 @@ static int block_num;
 int        block_pos;
 
 uint32_t codegen_endpc;
+int      codegen_x87_ea_record;
+x86seg  *codegen_ea_target_seg;
 
 int        codegen_block_cycles;
 static int codegen_block_ins;
@@ -61,8 +68,13 @@ static int      last_ssegs;
 void
 codegen_init(void)
 {
-    codeblock      = plat_mmap(BLOCK_SIZE * sizeof(codeblock_t), 1);
-    codeblock_hash = calloc(1, HASH_SIZE * sizeof(codeblock_t *));
+    uint8_t large_block = 0, large_hash = 0;
+    codeblock      = plat_mmap(BLOCK_SIZE * sizeof(codeblock_t), 1, &large_block);
+    codeblock_hash = plat_mmap(HASH_SIZE * sizeof(codeblock_t *), 0, &large_hash);
+    if (large_block)
+        pclog("Allocated %" PRIu64 " bytes of large pages for codeblocks\n", (uint64_t) (BLOCK_SIZE * sizeof(codeblock_t)));
+    if (large_hash)
+        pclog("Allocated %" PRIu64 " bytes of large pages for codeblock hashes\n", (uint64_t) (HASH_SIZE * sizeof(codeblock_t *)));
 
     memset(codeblock, 0, BLOCK_SIZE * sizeof(codeblock_t));
 
@@ -257,6 +269,17 @@ codegen_block_start_recompile(codeblock_t *block)
 
     block->status = cpu_cur_status;
 
+#    ifndef OLD_GPF
+    /*#SS(0), for a limit fault through SS: its own abort, then the #GP stub's
+      error code and exit*/
+    block_pos = BLOCK_SS_OFFSET;
+    addbyte(0xC6); /*MOVB ABRT_SS,(abrt)*/
+    addbyte(0x45);
+    addbyte((uint8_t) cpu_state_offset(abrt));
+    addbyte(ABRT_SS);
+    addbyte(0xeb); /*JMP past the #GP stub's MOVB*/
+    addbyte(4);
+#    endif
     block_pos = BLOCK_GPF_OFFSET;
 #    ifdef OLD_GPF
 #        if _WIN64
@@ -289,10 +312,32 @@ codegen_block_start_recompile(codeblock_t *block)
     addlong((uint32_t) rip_rel);
 #    endif
     block_pos = BLOCK_EXIT_OFFSET; /*Exit code*/
+#if _WIN64
+    /* XMM6 holds guest FPU/MMX values and XMM15 is scratch, and the
+       Windows x64 ABI makes both the caller's: put back what it had. */
+    addbyte(0xf3); /*MOVDQU XMM6, [RSP+0x28]*/
+    addbyte(0x0f);
+    addbyte(0x6f);
+    addbyte(0x74);
+    addbyte(0x24);
+    addbyte(0x28);
+    addbyte(0xf3); /*MOVDQU XMM15, [RSP+0x38]*/
+    addbyte(0x44);
+    addbyte(0x0f);
+    addbyte(0x6f);
+    addbyte(0x7c);
+    addbyte(0x24);
+    addbyte(0x38);
+    addbyte(0x48); /*ADDL $72,%rsp*/
+    addbyte(0x83);
+    addbyte(0xC4);
+    addbyte(0x48);
+#else
     addbyte(0x48);                 /*ADDL $40,%rsp*/
     addbyte(0x83);
     addbyte(0xC4);
     addbyte(0x28);
+#endif
     addbyte(0x41); /*POP R15*/
     addbyte(0x5f);
     addbyte(0x41); /*POP R14*/
@@ -320,10 +365,30 @@ codegen_block_start_recompile(codeblock_t *block)
     addbyte(0x56);
     addbyte(0x41); /*PUSH R15*/
     addbyte(0x57);
+#if _WIN64
+    addbyte(0x48); /*SUBL $72,%rsp*/
+    addbyte(0x83);
+    addbyte(0xEC);
+    addbyte(0x48);
+    addbyte(0xf3); /*MOVDQU [RSP+0x28], XMM6*/
+    addbyte(0x0f);
+    addbyte(0x7f);
+    addbyte(0x74);
+    addbyte(0x24);
+    addbyte(0x28);
+    addbyte(0xf3); /*MOVDQU [RSP+0x38], XMM15*/
+    addbyte(0x44);
+    addbyte(0x0f);
+    addbyte(0x7f);
+    addbyte(0x7c);
+    addbyte(0x24);
+    addbyte(0x38);
+#else
     addbyte(0x48); /*SUBL $40,%rsp*/
     addbyte(0x83);
     addbyte(0xEC);
     addbyte(0x28);
+#endif
     addbyte(0x48); /*MOVL RBP, &cpu_state*/
     addbyte(0xBD);
     addquad(((uintptr_t) &cpu_state) + 128);
@@ -342,6 +407,7 @@ codegen_block_start_recompile(codeblock_t *block)
 
     codegen_flags_changed = 0;
     codegen_fpu_entered   = 0;
+    codegen_fpu_class_dirty = 0;
     codegen_mmx_entered   = 0;
 
     codegen_fpu_loaded_iq[0] = codegen_fpu_loaded_iq[1] = codegen_fpu_loaded_iq[2] = codegen_fpu_loaded_iq[3] = codegen_fpu_loaded_iq[4] = codegen_fpu_loaded_iq[5] = codegen_fpu_loaded_iq[6] = codegen_fpu_loaded_iq[7] = 0;
@@ -354,6 +420,7 @@ codegen_block_start_recompile(codeblock_t *block)
 
     codegen_flat_ds = !(cpu_cur_status & CPU_STATUS_NOTFLATDS);
     codegen_flat_ss = !(cpu_cur_status & CPU_STATUS_NOTFLATSS);
+    codegen_flat_es = !(cpu_cur_status & CPU_STATUS_NOTFLATES);
 }
 
 void
@@ -439,10 +506,32 @@ codegen_block_end_recompile(codeblock_t *block)
 
     codegen_accumulate_flush();
 
+#if _WIN64
+    /* XMM6 holds guest FPU/MMX values and XMM15 is scratch, and the
+       Windows x64 ABI makes both the caller's: put back what it had. */
+    addbyte(0xf3); /*MOVDQU XMM6, [RSP+0x28]*/
+    addbyte(0x0f);
+    addbyte(0x6f);
+    addbyte(0x74);
+    addbyte(0x24);
+    addbyte(0x28);
+    addbyte(0xf3); /*MOVDQU XMM15, [RSP+0x38]*/
+    addbyte(0x44);
+    addbyte(0x0f);
+    addbyte(0x6f);
+    addbyte(0x7c);
+    addbyte(0x24);
+    addbyte(0x38);
+    addbyte(0x48); /*ADDL $72,%rsp*/
+    addbyte(0x83);
+    addbyte(0xC4);
+    addbyte(0x48);
+#else
     addbyte(0x48); /*ADDL $40,%rsp*/
     addbyte(0x83);
     addbyte(0xC4);
     addbyte(0x28);
+#endif
     addbyte(0x41); /*POP R15*/
     addbyte(0x5f);
     addbyte(0x41); /*POP R14*/
@@ -457,7 +546,7 @@ codegen_block_end_recompile(codeblock_t *block)
     addbyte(0x5b); /*POP RDX*/
     addbyte(0xC3); /*RET*/
 
-    if (block_pos > BLOCK_GPF_OFFSET)
+    if (block_pos > BLOCK_SS_OFFSET)
         fatal("Over limit!\n");
 
     remove_from_block_list(block, block->pc);
@@ -499,7 +588,7 @@ static int opcode_modrm[256] = {
 int opcode_0f_modrm[256] = {
     1, 1, 1, 1,  0, 0, 0, 0,  0, 0, 0, 0,  0, 1, 0, 1, /*00*/
     1, 1, 1, 1,  0, 0, 0, 0,  1, 1, 1, 1,  1, 1, 1, 1, /*10*/
-    1, 1, 1, 1,  1, 1, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0, /*20*/
+    1, 1, 1, 1,  1, 1, 1, 0,  0, 0, 0, 0,  0, 0, 0, 0, /*20*/
     0, 0, 0, 0,  0, 0, 1, 1,  0, 0, 0, 0,  0, 0, 0, 1, /*30*/
 
     1, 1, 1, 1,  1, 1, 1, 1,  1, 1, 1, 1,  1, 1, 1, 1, /*40*/
@@ -804,6 +893,109 @@ codegen_generate_ea_32_long(x86seg *op_ea_seg, uint32_t fetchdat, int op_ssegs, 
     return op_ea_seg;
 }
 // #endif
+
+/*The FPU's opcode and instruction and data pointers after an x87
+  instruction, as opESCAPE sets them: a control instruction leaves the last
+  one's. seg, if not NULL, is a compiled memory operand's segment, which the
+  block need not have put in ea_seg for fpu_postamble.*/
+static void
+codegen_fpu_pointers(codeblock_t *block, uint32_t op87, x86seg *seg)
+{
+    if (x87_op_is_control(op87 & 0x7ff))
+        return;
+
+    addbyte(0x50 | REG_ESI); /*PUSH RSI*/
+    addbyte(0x48); /*MOV RSI, &(cpu_state.fpu_op)*/
+    addbyte(0xb8 | REG_ESI);
+    addquad((uint64_t) &(cpu_state.fpu_op));
+    addbyte(0x66); /*MOVW $x87_op,(RSI)*/
+    addbyte(0xC7);
+    addbyte(0x00 | REG_ESI);
+    addword(op87 & 0x7ff); /*this instruction's: x87_op is the last run's*/
+    addbyte(0x48); /*MOV RSI, &(cpu_state.fpu_CS)*/
+    addbyte(0xb8 | REG_ESI);
+    addquad((uint64_t) &(cpu_state.fpu_CS));
+    addbyte(0x66); /*MOVW $cpu_state.temp_CS,(RSI)*/
+    addbyte(0xC7);
+    addbyte(0x00 | REG_ESI);
+    addword(cpu_state.temp_CS);
+    addbyte(0x48); /*MOV RSI, &(cpu_state.fpu_cs)*/
+    addbyte(0xb8 | REG_ESI);
+    addquad((uint64_t) &(cpu_state.fpu_cs));
+    addbyte(0xC7); /*MOVL $cpu_state.temp_cs,(RSI)*/
+    addbyte(0x00 | REG_ESI);
+    addlong(cpu_state.temp_cs);
+    addbyte(0x48); /*MOV RSI, &(cpu_state.fpu_pc)*/
+    addbyte(0xb8 | REG_ESI);
+    addquad((uint64_t) &(cpu_state.fpu_pc));
+    addbyte(0xC7); /*MOVL $cpu_state.temp_pc,(RSI)*/
+    addbyte(0x00 | REG_ESI);
+    addlong(cpu_state.temp_pc);
+    if (seg && ((op87 & 0xff) < 0xc0)) {
+        addbyte(0x48); /*MOV RSI, seg*/
+        addbyte(0xb8 | REG_ESI);
+        addquad((uint64_t) (uintptr_t) seg);
+        addbyte(0x48); /*MOV [ea_seg], RSI*/
+        addbyte(0x89);
+        addbyte(0x75);
+        addbyte((uint8_t) cpu_state_offset(ea_seg));
+    }
+    addbyte(0x58 | REG_ESI); /*POP RSI*/
+    if ((op87 & 0xff) < 0xc0)
+        call(block, (uintptr_t) fpu_postamble);
+}
+
+/*Escapes the interpreter runs every time: softfloat, no FPU fitted (#NM or
+  nothing), and an 8087 or 287, whose projective infinities (IC clear) the
+  compiled arithmetic and compares don't know*/
+static int
+codegen_x87_interpreted(void)
+{
+    return fpu_softfloat || !hasfpu || (fpu_type < FPU_287XL);
+}
+
+/* The compiled arithmetic is built for the control word's precision (PC24,
+   FP_ROUND_PC) and rounding (FADD with RC other than nearest is the
+   interpreter's) as they are when it is compiled: at the block's start by
+   the block key, and after an interpreted instruction that may have loaded
+   another control word by this check, before the first escape whose
+   compiled form depends on them. It leaves the block before the instruction
+   if they changed. FLDCW, FISTP, FLDCW (_ftol) needs none: FIST takes the
+   rounding when it runs. */
+static void
+codegen_fpu_class_check(codeblock_t *block, uint16_t op87, uint32_t old_pc)
+{
+    const int esc = (op87 >> 8) & 7;
+
+    if (!codegen_fpu_class_dirty)
+        return;
+    /* D8, DA, DC, DE: arithmetic and compares; D9 C0-FF: FCHS, FSQRT... */
+    if (!(esc & 1) || ((esc == 1) && ((op87 & 0xc0) == 0xc0))) {
+        codegen_fpu_class_dirty = 0;
+        addbyte(0xC7); /*MOVL $old_pc,(pc)*/
+        addbyte(0x45);
+        addbyte((uint8_t) cpu_state_offset(pc));
+        addlong(old_pc);
+        addbyte(0x0f); /*MOVZX EAX, [npxc]*/
+        addbyte(0xb7);
+        addbyte(0x45);
+        addbyte((uint8_t) cpu_state_offset(npxc));
+        addbyte(0x89); /*MOV ECX, EAX*/
+        addbyte(0xc1);
+        addbyte(0x25); /*AND EAX, 0x300*/
+        addlong(0x300);
+        addbyte(0x0f); /*JZ/JNZ end: PC 24 is 0*/
+        addbyte((cpu_state.npxc & 0x300) ? 0x84 : 0x85);
+        addlong(BLOCK_EXIT_OFFSET - (block_pos + 4));
+        addbyte(0x81); /*AND ECX, 0xc00*/
+        addbyte(0xe1);
+        addlong(0xc00);
+        addbyte(0x0f); /*JZ/JNZ end: RC nearest is 0*/
+        addbyte((cpu_state.npxc & 0xc00) ? 0x84 : 0x85);
+        addlong(BLOCK_EXIT_OFFSET - (block_pos + 4));
+    }
+}
+
 void
 codegen_generate_call(uint8_t opcode, OpFn op, uint32_t fetchdat, uint32_t new_pc, uint32_t old_pc)
 {
@@ -818,6 +1010,8 @@ codegen_generate_call(uint8_t opcode, OpFn op, uint32_t fetchdat, uint32_t new_p
     int          pc_off          = 0;
     int          test_modrm      = 1;
     int          in_lock         = 0;
+    int          lock_illegal    = 0;
+    int          is_fpu          = 0;
     int          c;
     uint32_t     op87            = 0x00000000;
 
@@ -836,8 +1030,11 @@ codegen_generate_call(uint8_t opcode, OpFn op, uint32_t fetchdat, uint32_t new_p
         switch (opcode) {
             case 0x0f:
                 op_table        = x86_dynarec_opcodes_0f;
-                recomp_op_table = fpu_softfloat ? recomp_opcodes_0f_no_mmx : recomp_opcodes_0f;
+                /*The compiled MMX rows only on a CPU with MMX: without it they
+                  are #UD, or other instructions (the 6x86's SMM ones at 0F 78-7E)*/
+                recomp_op_table = (fpu_softfloat || !cpu_has_feature(CPU_FEATURE_MMX)) ? recomp_opcodes_0f_no_mmx : recomp_opcodes_0f;
                 over            = 1;
+                is_fpu          = 0;
                 break;
 
             case 0x26: /*ES:*/
@@ -875,97 +1072,107 @@ codegen_generate_call(uint8_t opcode, OpFn op, uint32_t fetchdat, uint32_t new_p
             case 0xd8:
                 op87            = (op87 & 0xf800) | ((opcode & 0x07) << 8) | (fetchdat & 0xff);
                 op_table        = (op_32 & 0x200) ? x86_dynarec_opcodes_d8_a32 : x86_dynarec_opcodes_d8_a16;
-                recomp_op_table = fpu_softfloat ? NULL : recomp_opcodes_d8;
+                recomp_op_table = codegen_x87_interpreted() ? NULL : recomp_opcodes_d8;
                 opcode_shift    = 3;
                 opcode_mask     = 0x1f;
                 over            = 1;
                 pc_off          = -1;
                 test_modrm      = 0;
+                is_fpu          = 1;
                 block->flags |= CODEBLOCK_HAS_FPU;
                 break;
             case 0xd9:
                 op87            = (op87 & 0xf800) | ((opcode & 0x07) << 8) | (fetchdat & 0xff);
                 op_table        = (op_32 & 0x200) ? x86_dynarec_opcodes_d9_a32 : x86_dynarec_opcodes_d9_a16;
-                recomp_op_table = fpu_softfloat ? NULL : recomp_opcodes_d9;
+                recomp_op_table = codegen_x87_interpreted() ? NULL : recomp_opcodes_d9;
                 opcode_mask     = 0xff;
                 over            = 1;
                 pc_off          = -1;
                 test_modrm      = 0;
+                is_fpu          = 1;
                 block->flags |= CODEBLOCK_HAS_FPU;
                 break;
             case 0xda:
                 op87            = (op87 & 0xf800) | ((opcode & 0x07) << 8) | (fetchdat & 0xff);
                 op_table        = (op_32 & 0x200) ? x86_dynarec_opcodes_da_a32 : x86_dynarec_opcodes_da_a16;
-                recomp_op_table = fpu_softfloat ? NULL : recomp_opcodes_da;
+                recomp_op_table = codegen_x87_interpreted() ? NULL : recomp_opcodes_da;
                 opcode_mask     = 0xff;
                 over            = 1;
                 pc_off          = -1;
                 test_modrm      = 0;
+                is_fpu          = 1;
                 block->flags |= CODEBLOCK_HAS_FPU;
                 break;
             case 0xdb:
                 op87            = (op87 & 0xf800) | ((opcode & 0x07) << 8) | (fetchdat & 0xff);
                 op_table        = (op_32 & 0x200) ? x86_dynarec_opcodes_db_a32 : x86_dynarec_opcodes_db_a16;
-                recomp_op_table = fpu_softfloat ? NULL : recomp_opcodes_db;
+                recomp_op_table = codegen_x87_interpreted() ? NULL : recomp_opcodes_db;
                 opcode_mask     = 0xff;
                 over            = 1;
                 pc_off          = -1;
                 test_modrm      = 0;
+                is_fpu          = 1;
                 block->flags |= CODEBLOCK_HAS_FPU;
                 break;
             case 0xdc:
                 op87            = (op87 & 0xf800) | ((opcode & 0x07) << 8) | (fetchdat & 0xff);
                 op_table        = (op_32 & 0x200) ? x86_dynarec_opcodes_dc_a32 : x86_dynarec_opcodes_dc_a16;
-                recomp_op_table = fpu_softfloat ? NULL : recomp_opcodes_dc;
+                recomp_op_table = codegen_x87_interpreted() ? NULL : recomp_opcodes_dc;
                 opcode_shift    = 3;
                 opcode_mask     = 0x1f;
                 over            = 1;
                 pc_off          = -1;
                 test_modrm      = 0;
+                is_fpu          = 1;
                 block->flags |= CODEBLOCK_HAS_FPU;
                 break;
             case 0xdd:
                 op87            = (op87 & 0xf800) | ((opcode & 0x07) << 8) | (fetchdat & 0xff);
                 op_table        = (op_32 & 0x200) ? x86_dynarec_opcodes_dd_a32 : x86_dynarec_opcodes_dd_a16;
-                recomp_op_table = fpu_softfloat ? NULL : recomp_opcodes_dd;
+                recomp_op_table = codegen_x87_interpreted() ? NULL : recomp_opcodes_dd;
                 opcode_mask     = 0xff;
                 over            = 1;
                 pc_off          = -1;
                 test_modrm      = 0;
+                is_fpu          = 1;
                 block->flags |= CODEBLOCK_HAS_FPU;
                 break;
             case 0xde:
                 op87            = (op87 & 0xf800) | ((opcode & 0x07) << 8) | (fetchdat & 0xff);
                 op_table        = (op_32 & 0x200) ? x86_dynarec_opcodes_de_a32 : x86_dynarec_opcodes_de_a16;
-                recomp_op_table = fpu_softfloat ? NULL : recomp_opcodes_de;
+                recomp_op_table = codegen_x87_interpreted() ? NULL : recomp_opcodes_de;
                 opcode_mask     = 0xff;
                 over            = 1;
                 pc_off          = -1;
                 test_modrm      = 0;
+                is_fpu          = 1;
                 block->flags |= CODEBLOCK_HAS_FPU;
                 break;
             case 0xdf:
                 op87            = (op87 & 0xf800) | ((opcode & 0x07) << 8) | (fetchdat & 0xff);
                 op_table        = (op_32 & 0x200) ? x86_dynarec_opcodes_df_a32 : x86_dynarec_opcodes_df_a16;
-                recomp_op_table = fpu_softfloat ? NULL : recomp_opcodes_df;
+                recomp_op_table = codegen_x87_interpreted() ? NULL : recomp_opcodes_df;
                 opcode_mask     = 0xff;
                 over            = 1;
                 pc_off          = -1;
                 test_modrm      = 0;
+                is_fpu          = 1;
                 block->flags |= CODEBLOCK_HAS_FPU;
                 break;
 
             case 0xf0: /*LOCK*/
-                in_lock         = 0;
+                in_lock = 1;
                 break;
 
             case 0xf2: /*REPNE*/
                 op_table        = x86_dynarec_opcodes_REPNE;
                 recomp_op_table = recomp_opcodes_REPNE;
+                is_fpu          = 0;
                 break;
             case 0xf3: /*REPE*/
                 op_table        = x86_dynarec_opcodes_REPE;
                 recomp_op_table = recomp_opcodes_REPE;
+                is_fpu          = 0;
                 break;
 
             default:
@@ -1010,15 +1217,71 @@ generate_call:
         recomp_op_table = recomp_opcodes;
     }
 
-    if (op87 != 0x0000) {
+    /* Every escape stores its opcode, D8 00 included */
+    if (is_fpu) {
         STORE_IMM_ADDR_L((uintptr_t) &x87_op, op87);
     }
 
-    if (in_lock && ((opcode == 0x90) || (opcode == 0xec)))
+    /*A LOCK the instruction can't take is #UD: leave it to the interpreter's.
+      The byte after the LOCK may be another prefix, so this waits for the
+      opcode*/
+    if (in_lock) {
+        if (op_table == x86_dynarec_opcodes_0f)
+            lock_illegal = !x86_lock_legal(1, opcode, fetchdat & 0xff);
+        else if ((op_table == x86_dynarec_opcodes) || (op_table == x86_dynarec_opcodes_REPE) || (op_table == x86_dynarec_opcodes_REPNE))
+            lock_illegal = !x86_lock_legal(0, opcode, fetchdat & 0xff);
+        else
+            lock_illegal = 1;
+    }
+    if (lock_illegal)
         goto codegen_skip;
 
+    /*What opESCAPE does before the instruction, for compiled ones and the
+      handlers called below alike: a no-wait instruction asserts FERR# for an
+      error not yet reported; a waiting one takes a pending error first. An
+      interpreted FPU instruction clears codegen_fpu_entered, so one that
+      leaves an error makes the next check again.*/
+    if (is_fpu) {
+        codegen_mmx_entered = 0;
+        if (x87_op_is_nowait(op87 & 0x7ff)) {
+            load_param_1_32(block, op87 & 0x7ff);
+            call(block, (uintptr_t) x87_ferr_nowait);
+        } else if (!fpu_softfloat && !codegen_fpu_entered) {
+            /* only with ES set: no error, nothing to take */
+            int skip;
+
+            addbyte(0xf6); /*TEST BYTE [npxs], 0x80*/
+            addbyte(0x45);
+            addbyte((uint8_t) cpu_state_offset(npxs));
+            addbyte(0x80);
+            addbyte(0x74); /*JZ skip*/
+            addbyte(0);
+            skip = block_pos;
+            addbyte(0xC7); /*MOVL $old_pc,(oldpc)*/
+            addbyte(0x45);
+            addbyte((uint8_t) cpu_state_offset(oldpc));
+            addlong(old_pc);
+            call(block, (uintptr_t) x87_legacy_pending_entry);
+            addbyte(0x85); /*TEST EAX, EAX*/
+            addbyte(0xc0);
+            addbyte(0x0f); /*JNZ end*/
+            addbyte(0x85);
+            addlong(BLOCK_EXIT_OFFSET - (block_pos + 4));
+            block->data[skip - 1] = (uint8_t) (block_pos - skip);
+        }
+    }
+
     if (recomp_op_table && recomp_op_table[(opcode | op_32) & 0x1ff]) {
-        uint32_t new_pc = recomp_op_table[(opcode | op_32) & 0x1ff](opcode, fetchdat, op_32, op_pc, block);
+        uint32_t new_pc;
+
+        if (is_fpu)
+            codegen_fpu_class_check(block, op87, old_pc);
+        codegen_ea_target_seg = NULL;
+        codegen_x87_ea_record = is_fpu && cpu_dyn_accurate_fpu_env;
+        new_pc                = recomp_op_table[(opcode | op_32) & 0x1ff](opcode, fetchdat, op_32, op_pc, block);
+        codegen_x87_ea_record = 0;
+        if (new_pc && cpu_dyn_accurate_fpu_env && is_fpu)
+            codegen_fpu_pointers(block, op87, codegen_ea_target_seg);
         if (new_pc) {
             if (new_pc != -1)
                 STORE_IMM_ADDR_L((uintptr_t) &cpu_state.pc, new_pc);
@@ -1026,7 +1289,7 @@ generate_call:
             codegen_block_ins++;
             block->ins++;
             codegen_block_full_ins++;
-            codegen_endpc = (cs + cpu_state.pc) + 8;
+            codegen_endpc = (cs + cpu_state.pc) + 14;
 
 #    ifdef CHECK_INT
             /* Check for interrupts. */
@@ -1045,7 +1308,7 @@ generate_call:
     }
 
 codegen_skip:
-    if (in_lock && ((opcode == 0x90) || (opcode == 0xec)))
+    if (lock_illegal)
         /* This is always ILLEGAL. */
         op = x86_dynarec_opcodes_3DNOW[0xff];
     else
@@ -1107,7 +1370,21 @@ codegen_skip:
 
     load_param_1_32(block, fetchdat);
     call(block, (uintptr_t) op);
+    /*The pointers as opESCAPE leaves them, whatever the handler returned,
+      which waits in EBX (callee-saved) past fpu_postamble*/
+    if (cpu_dyn_accurate_fpu_env && is_fpu) {
+        addbyte(0x89); /*MOV EBX, EAX*/
+        addbyte(0xc3);
+        codegen_fpu_pointers(block, op87, NULL);
+        addbyte(0x89); /*MOV EAX, EBX*/
+        addbyte(0xd8);
+    }
+    /*No softfloat exception check after the instruction: a pending #MF is
+      raised by the next waiting FPU instruction (or WAIT), as the book says,
+      and the no-wait ones (FNSTSW, FNSTCW, FNCLEX...) don't raise it*/
 
+    /*The handler leaves flags_op as it ran, which the block can't know*/
+    codegen_flags_changed = 0;
     codegen_block_ins++;
 
     block->ins++;
@@ -1126,7 +1403,19 @@ codegen_skip:
     addbyte(0x85); /*JNZ 0*/
     addlong((uint32_t) (uintptr_t) &block->data[BLOCK_EXIT_OFFSET] - (uint32_t) (uintptr_t) (&block->data[block_pos + 4]));
 
-    codegen_endpc = (cs + cpu_state.pc) + 8;
+    /*An interpreted x87 or 0F instruction can undo what the block took as
+      done (FNINIT, FRSTOR, FXRSTOR and FEMMS empty the tags and leave MMX
+      mode, CLTS and LMSW change CR0): the next compiled FPU or MMX
+      instruction checks and enters again. FLDCW, FLDENV, FRSTOR, FNINIT or
+      FXRSTOR can also change the control word's classes: the next compiled
+      arithmetic checks them (codegen_fpu_class_check).*/
+    if (is_fpu || (op_table == x86_dynarec_opcodes_0f)) {
+        codegen_fpu_entered     = 0;
+        codegen_mmx_entered     = 0;
+        codegen_fpu_class_dirty = 1;
+    }
+
+    codegen_endpc = (cs + cpu_state.pc) + 14;
 }
 
 #endif

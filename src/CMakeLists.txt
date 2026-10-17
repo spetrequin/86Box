@@ -37,11 +37,13 @@ add_executable(86Box
     pci_dummy.c
     pic.c
     pit.c
+    pit_exact.c
     pit_fast.c
     port_6x.c
     port_92.c
     ppi.c
     pci.c
+    eisa.c
     mca.c
     usb.c
     device.c
@@ -64,8 +66,12 @@ if(GDBSTUB)
     target_sources(86Box PRIVATE gdbstub.c)
 endif()
 
-if(NEW_DYNAREC)
-    add_compile_definitions(USE_NEW_DYNAREC)
+if(AUTOMATION)
+    add_compile_definitions(USE_AUTOMATION)
+    target_sources(86Box PRIVATE automation.c)
+    if(WIN32)
+        target_link_libraries(86Box ws2_32)
+    endif()
 endif()
 
 if(RELEASE)
@@ -195,9 +201,7 @@ configure_file(include/86box/version.h.in include/86box/version.h @ONLY)
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/include)
 
 include_directories(include)
-if(NEW_DYNAREC)
-    include_directories(cpu codegen_new)
-elseif(DYNAREC)
+if(DYNAREC)
     include_directories(cpu codegen)
 else()
     include_directories(cpu)
@@ -208,9 +212,7 @@ add_subdirectory(char)
 add_subdirectory(chipset)
 
 add_subdirectory(cpu)
-if(NEW_DYNAREC)
-    add_subdirectory(codegen_new)
-elseif(DYNAREC)
+if(DYNAREC)
     add_subdirectory(codegen)
 endif()
 
@@ -226,6 +228,46 @@ if(WIN32 OR (APPLE AND CMAKE_MACOSX_BUNDLE))
 else()
     # On Linux we want to copy the binary to the `bin` folder.
     install(TARGETS 86Box)
+endif()
+
+if(CMAKE_SYSTEM_NAME MATCHES "Linux")
+    include(GNUInstallDirs)
+
+    set(ASSETS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/unix/assets")
+
+    # Icons
+    foreach(ICON_SIZE 16 20 24 32 40 48 64 72 128 256)
+        install(FILES "${ASSETS_DIR}/${ICON_SIZE}x${ICON_SIZE}/net.86box.86Box.png"
+            DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/${ICON_SIZE}x${ICON_SIZE}/apps")
+    endforeach()
+
+    # Desktop entry
+    install(FILES "${ASSETS_DIR}/net.86box.86Box.desktop"
+        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/applications")
+
+    # AppStream metadata
+    install(FILES "${ASSETS_DIR}/net.86box.86Box.metainfo.xml"
+        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/metainfo")
+
+    # VFIO device preparation helper, and its polkit policy translated from the UI's .po files
+    if(VFIO AND VFIO_AVAILABLE)
+        install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/device/vfio-setup.sh"
+            DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/86box" RENAME vfio-setup)
+
+        set(VFIO_POLICY "${CMAKE_CURRENT_BINARY_DIR}/net.86box.86Box.vfio-setup.policy")
+        file(GLOB VFIO_POLICY_PO "${CMAKE_CURRENT_SOURCE_DIR}/qt/languages/*.po")
+        add_custom_command(OUTPUT "${VFIO_POLICY}"
+            COMMAND "${CMAKE_COMMAND}" "-DIN=${ASSETS_DIR}/net.86box.86Box.vfio-setup.policy.in"
+                    "-DOUT=${VFIO_POLICY}" "-DPO_DIR=${CMAKE_CURRENT_SOURCE_DIR}/qt/languages"
+                    "-DHELPER=${CMAKE_INSTALL_FULL_LIBEXECDIR}/86box/vfio-setup"
+                    -P "${PROJECT_SOURCE_DIR}/cmake/PolkitPolicy.cmake"
+            DEPENDS "${ASSETS_DIR}/net.86box.86Box.vfio-setup.policy.in" ${VFIO_POLICY_PO}
+                    "${PROJECT_SOURCE_DIR}/cmake/PolkitPolicy.cmake"
+            COMMENT "Generating the VFIO polkit policy")
+        add_custom_target(vfio-policy ALL DEPENDS "${VFIO_POLICY}")
+        # polkit only reads policies from its own directory, usually under /usr.
+        install(FILES "${VFIO_POLICY}" DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/polkit-1/actions")
+    endif()
 endif()
 
 

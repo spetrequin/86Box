@@ -17,6 +17,7 @@
  */
 #include <cstdint>
 #include <cstdio>
+#include <vector>
 
 extern "C" {
 #include <86box/86box.h>
@@ -24,6 +25,8 @@ extern "C" {
 #include <86box/device.h>
 #include <86box/machine.h>
 #include <86box/lpt.h>
+#include <86box/scsi_device.h>
+#include <86box/scsi_tape.h>
 #include <86box/serial.h>
 #include <86box/char.h>
 }
@@ -34,9 +37,13 @@ extern "C" {
 #include "qt_defs.hpp"
 
 #include "qt_settings_completer.hpp"
+#include "qt_settings_bus_tracking.hpp"
+#include "qt_harddrive_common.hpp"
 
 #include "qt_settingsports.hpp"
 #include "ui_qt_settingsports.h"
+
+#include <QStandardItem>
 
 SettingsPorts::SettingsPorts(QWidget *parent)
     : QWidget(parent)
@@ -65,6 +72,20 @@ SettingsPorts::~SettingsPorts()
         delete scCom[i];
 
     delete ui;
+}
+
+void
+SettingsPorts::updateLptPortTracking(int i)
+{
+    auto *comboBox = findChild<QComboBox *>(QString("comboBoxLpt%1").arg(i + 1));
+    if (comboBox == NULL)
+        return;
+
+    int  device   = comboBox->currentData().toInt();
+    bool occupied = (lpt_ports[i].enabled > 0) && (device > 0) &&
+                    (char_get_device(device) != &lpt_ditto_device);
+
+    Harddrives::busTrackClass->device_track(occupied ? 1 : 0, DEV_LPT, TAPE_BUS_LPT, i);
 }
 
 int
@@ -149,6 +170,23 @@ SettingsPorts::save(int soft)
     jumpered_internal_ecp_dma = ui->comboBoxLptECPDMA->currentData().toInt();
 }
 
+/* The character devices, for the parallel and serial port lists alike. */
+static const QVector<Models::Device> &
+charDevices()
+{
+    return Models::Devices(
+        char_get_device,
+        [](int c) -> const char * {
+            const device_t *dev = char_get_device(c);
+            return (dev != nullptr) ? dev->internal_name : nullptr;
+        },
+        [](int c) -> int {
+            const device_t *dev = char_get_device(c);
+            return (dev != nullptr) && device_available(dev);
+        },
+        -1);
+}
+
 void
 SettingsPorts::onCurrentMachineChanged(int machineId)
 {
@@ -164,6 +202,7 @@ SettingsPorts::onCurrentMachineChanged(int machineId)
     int selectedRow = -2;
     int first       = -2;
 
+    Models::Batch ecpDmaRows(lptEcpDmaModel);
     for (int i = 0; i < 9; ++i) {
         int j = machine_map_jumpered_ecp_dma(i);
 
@@ -174,18 +213,15 @@ SettingsPorts::onCurrentMachineChanged(int machineId)
             first = j;
 
         QString name = tr(machine_get_jumpered_ecp_dma_name(i));
-        int     row  = lptEcpDmaModel->rowCount();
-        lptEcpDmaModel->insertRow(row);
-        auto idx = lptEcpDmaModel->index(row, 0);
-
-        lptEcpDmaModel->setData(idx, name, Qt::DisplayRole);
-        lptEcpDmaModel->setData(idx, j, Qt::UserRole);
+        int     row  = ecpDmaRows.add(name, j);
 
         if (j == jumpered_internal_ecp_dma)
             selectedRow = row - removeRowsEcpDma;
 
         c++;
     }
+
+    ecpDmaRows.commit();
 
     if (selectedRow == -2)
         selectedRow = first;
@@ -215,33 +251,23 @@ SettingsPorts::onCurrentMachineChanged(int machineId)
         removeRows_[i] = models[i]->rowCount();
     }
 
-    while (true) {
-        const device_t *device = char_get_device(c);
-        const QString name = DeviceConfig::DeviceName(device,
-                                                      device ? device->internal_name : nullptr, -1);
+    const auto &chars = charDevices();
 
-        if (name.isEmpty())
-            break;
+    std::vector<Models::Batch> lptRows(models, models + PARALLEL_MAX);
+    for (const auto &device : chars) {
+        if ((device.dev->flags & DEVICE_LPT) && device.available && device_is_valid(device.dev, machineId)) {
+            for (uint8_t i = 0; i < PARALLEL_MAX; ++i) {
+                int row = lptRows[i].add(device.name, device.id);
+                scLpt[i]->addDevice(nullptr, device.name);
 
-        if ((device->flags & DEVICE_LPT) && device_available(device)) {
-            if (name.isEmpty())
-                break;
-
-            if (device_is_valid(device, machineId)) {
-                for (uint8_t i = 0; i < PARALLEL_MAX; ++i) {
-                    int row = Models::AddEntry(models[i], name, c);
-                    scCom[i]->addDevice(nullptr, name);
-
-                    if (c == lpt_ports[i].device)
-                        selectedRows[i] = row - removeRows_[i];
-                }
+                if (device.id == lpt_ports[i].device)
+                    selectedRows[i] = row - removeRows_[i];
             }
         }
-
-        c++;
     }
 
     for (uint8_t i = 0; i < PARALLEL_MAX; ++i) {
+        lptRows[i].commit();
         models[i]->removeRows(0, removeRows_[i]);
         cbox[i]->setEnabled(models[i]->rowCount() > 1);
         cbox[i]->setCurrentIndex(-1);
@@ -258,6 +284,8 @@ SettingsPorts::onCurrentMachineChanged(int machineId)
                 buttonCfg->setEnabled(device_has_config(char_get_device(lptDevice)) && (lpt_ports[i].enabled > 0));
             }
         }
+
+        updateLptPortTracking(i);
     }
 
     c = 0;
@@ -271,33 +299,21 @@ SettingsPorts::onCurrentMachineChanged(int machineId)
         selectedRows[i] = 0;
     }
 
-    while (true) {
-        const device_t *device = char_get_device(c);
-        const QString name = DeviceConfig::DeviceName(device,
-                                                      device ? device->internal_name : nullptr, -1);
+    std::vector<Models::Batch> comRows(models, models + SERIAL_MAX_UI);
+    for (const auto &device : chars) {
+        if ((device.dev->flags & DEVICE_COM) && device.available && device_is_valid(device.dev, machineId)) {
+            for (uint8_t i = 0; i < SERIAL_MAX_UI; ++i) {
+                int row = comRows[i].add(device.name, device.id);
+                scCom[i]->addDevice(nullptr, device.name);
 
-        if (name.isEmpty())
-            break;
-
-        if ((device->flags & DEVICE_COM) && device_available(device)) {
-            if (name.isEmpty())
-                break;
-
-            if (device_is_valid(device, machineId)) {
-                for (uint8_t i = 0; i < SERIAL_MAX_UI; ++i) {
-                    int row = Models::AddEntry(models[i], name, c);
-                    scCom[i]->addDevice(nullptr, name);
-
-                    if (c == com_ports[i].device)
-                        selectedRows[i] = row - removeRows_[i];
-                }
+                if (device.id == com_ports[i].device)
+                    selectedRows[i] = row - removeRows_[i];
             }
         }
-
-        c++;
     }
 
     for (int i = 0; i < SERIAL_MAX_UI; i++) {
+        comRows[i].commit();
         models[i]->removeRows(0, removeRows_[i]);
         cbox[i]->setEnabled(models[i]->rowCount() > 1);
         cbox[i]->setCurrentIndex(-1);
@@ -325,6 +341,7 @@ SettingsPorts::on_comboBoxLpt1_currentIndexChanged(int index)
 
     int lptDevice = ui->comboBoxLpt1->currentData().toInt();
 
+    updateLptPortTracking(0);
     ui->pushButtonConfigureLpt1->setEnabled(ui->comboBoxLpt1->isEnabled() && device_has_config(char_get_device(lptDevice)));
 }
 
@@ -345,6 +362,7 @@ SettingsPorts::on_comboBoxLpt2_currentIndexChanged(int index)
 
     int lptDevice = ui->comboBoxLpt2->currentData().toInt();
 
+    updateLptPortTracking(1);
     ui->pushButtonConfigureLpt2->setEnabled(ui->comboBoxLpt2->isEnabled() && device_has_config(char_get_device(lptDevice)));
 }
 
@@ -365,6 +383,7 @@ SettingsPorts::on_comboBoxLpt3_currentIndexChanged(int index)
 
     int lptDevice = ui->comboBoxLpt3->currentData().toInt();
 
+    updateLptPortTracking(2);
     ui->pushButtonConfigureLpt3->setEnabled(ui->comboBoxLpt3->isEnabled() && device_has_config(char_get_device(lptDevice)));
 }
 
@@ -385,6 +404,7 @@ SettingsPorts::on_comboBoxLpt4_currentIndexChanged(int index)
 
     int lptDevice = ui->comboBoxLpt4->currentData().toInt();
 
+    updateLptPortTracking(3);
     ui->pushButtonConfigureLpt4->setEnabled(ui->comboBoxLpt4->isEnabled() && device_has_config(char_get_device(lptDevice)));
 }
 

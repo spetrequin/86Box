@@ -1,7 +1,15 @@
 #include "codegen_backend_arm64_defs.h"
 
-#define BLOCK_SIZE  0x4000
-#define BLOCK_MASK  0x3fff
+/*
+   Raised from 0x4000 (halves recompile thrash, measured on x86-64 - see
+   codegen_backend_x86-64.h, raised further there to 0x10000). Kept lower
+   here not for memory reasons - codeblock[] below is a plain data mmap
+   (see codegen_backend_arm64.c), not executable, so it doesn't compete
+   with ARM64's 128MB branch-range-limited code pool in codegen_allocator.c,
+   so an untested value would ship to every user by default.
+ */
+#define BLOCK_SIZE  0x8000
+#define BLOCK_MASK  0x7fff
 #define BLOCK_START 0
 
 #define HASH_SIZE   0x20000
@@ -13,6 +21,11 @@
 
 /* Let generic uop emitters use backend-specific immediate store helpers. */
 #define CODEGEN_BACKEND_HAS_MOV_IMM
+/* The integer uops of the SETcc, BSWAP, BSF/BSR, CMPXCHG and multiply
+   handlers: CMP_SET, TEST_SET, BSF, BSR, BSWAP, IMUL, IMUL_HI, IMUL_OV and
+   MUL_HI. A backend without them leaves those instructions to the
+   interpreter. */
+#define CODEGEN_BACKEND_HAS_INT_UOPS
 
 void host_arm64_BLR(codeblock_t *block, int addr_reg);
 void host_arm64_CBNZ(codeblock_t *block, int reg, uintptr_t dest);

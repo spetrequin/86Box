@@ -24,11 +24,14 @@
 #define HAVE_STDARG_H
 #include <86box/86box.h>
 #include <86box/io.h>
+#include <86box/device.h>
 #include <86box/timer.h>
+#include <86box/machine.h>
 #include "cpu.h"
 #include "x86.h"
 #include <86box/m_amstrad.h>
 #include <86box/pci.h>
+#include <86box/sio.h>
 
 #define NPORTS 65536 /* PC/AT supports 64K ports */
 
@@ -381,7 +384,7 @@ inb(uint16_t port)
             amstrad_latch = AMSTRAD_SW9 | 0x80000000;
     }
 
-    if (!found)
+    if (!found || (machines[machine].init == machine_xt_ibm5550_init) || (machines[machine].init == machine_xt_ibm5535_init))
         cycles -= io_delay;
 
     /* TriGem 486-BIOS MHz output. */
@@ -391,6 +394,9 @@ inb(uint16_t port)
 #endif
 
     io_log("[%04X:%08X] (%i, %i, %04i) in b(%04X) = %02X\n", CS, cpu_state.pc, in_smm, found, qfound, port, ret);
+
+    if ((port & 0xfff8) == 0x0200)
+        fdc37mx0x_watchdog_reset_ext(0);
 
     return ret;
 }
@@ -449,7 +455,8 @@ outb(uint16_t port, uint8_t val)
 
     io_log("[%04X:%08X] (%i, %i, %04i) outb(%04X, %02X)\n", CS, cpu_state.pc, in_smm, found, qfound, port, val);
 
-    return;
+    if ((port & 0xfff8) == 0x0200)
+        fdc37mx0x_watchdog_reset_ext(0);
 }
 
 uint16_t
@@ -524,10 +531,13 @@ inw(uint16_t port)
             amstrad_latch = AMSTRAD_SW9 | 0x80000000;
     }
 
-    if (!found)
+    if (!found || (machines[machine].init == machine_xt_ibm5550_init) || (machines[machine].init == machine_xt_ibm5535_init))
         cycles -= io_delay;
 
     io_log("[%04X:%08X] (%i, %i, %04i) in w(%04X) = %04X\n", CS, cpu_state.pc, in_smm, found, qfound, port, ret);
+
+    if ((port & 0xfff8) == 0x0200)
+        fdc37mx0x_watchdog_reset_ext(0);
 
     return ret;
 }
@@ -601,7 +611,8 @@ outw(uint16_t port, uint16_t val)
 
     io_log("[%04X:%08X] (%i, %i, %04i) outw(%04X, %04X)\n", CS, cpu_state.pc, in_smm, found, qfound, port, val);
 
-    return;
+    if ((port & 0xfff8) == 0x0200)
+        fdc37mx0x_watchdog_reset_ext(0);
 }
 
 uint32_t
@@ -708,10 +719,13 @@ inl(uint16_t port)
             amstrad_latch = AMSTRAD_SW9 | 0x80000000;
     }
 
-    if (!found)
+    if (!found || (machines[machine].init == machine_xt_ibm5550_init) || (machines[machine].init == machine_xt_ibm5535_init))
         cycles -= io_delay;
 
     io_log("[%04X:%08X] (%i, %i, %04i) in l(%04X) = %08X\n", CS, cpu_state.pc, in_smm, found, qfound, port, ret);
+
+    if ((port & 0xfff8) == 0x0200)
+        fdc37mx0x_watchdog_reset_ext(0);
 
     return ret;
 }
@@ -802,7 +816,8 @@ outl(uint16_t port, uint32_t val)
 
     io_log("[%04X:%08X] (%i, %i, %04i) outl(%04X, %08X)\n", CS, cpu_state.pc, in_smm, found, qfound, port, val);
 
-    return;
+    if ((port & 0xfff8) == 0x0200)
+        fdc37mx0x_watchdog_reset_ext(0);
 }
 
 static uint8_t

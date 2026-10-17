@@ -28,6 +28,7 @@
 #include <86box/nvr.h>
 #include <86box/plat.h>
 #include <86box/m_xt_xi8088.h>
+#include <86box/flash.h>
 
 typedef struct sst_t {
     uint8_t manufacturer;
@@ -55,6 +56,8 @@ typedef struct sst_t {
 
     mem_mapping_t mapping[8];
     mem_mapping_t mapping_h[8];
+    uint8_t      *exec[8];
+    uint8_t      *exec_h[8];
 
     pc_timer_t page_write_timer;
 } sst_t;
@@ -133,7 +136,8 @@ static char flash_path[1024];
 
 #define AMD         0x01 /* AMD Manufacturer's ID */
 #define AMD29F010A  0x2000
-#define AMD29F020A  0xb000
+#define AMD29F020A    0xb000
+#define AMD29F002NBT  0xb000
 
 #define SIZE_512K   0x010000
 #define SIZE_1M     0x020000
@@ -354,6 +358,9 @@ sst_write(uint32_t addr, uint8_t val, void *priv)
     uint32_t addr0 = 0x5555;
     uint32_t addr1 = 0x2aaa;
 
+    if (!flash_bios_write_selected(addr))
+        return;
+
     if (dev->manufacturer == AMD) {
         mask >>= 4;
         addr0 >>= 4;
@@ -436,6 +443,9 @@ sst_read(uint32_t addr, void *priv)
     const sst_t  *dev = (sst_t *) priv;
     uint8_t       ret = 0xff;
 
+    if (!flash_bios_read_selected(addr))
+        return 0xff;
+
     addr &= 0x000fffff;
 
     if (dev->id_mode)
@@ -454,6 +464,9 @@ sst_readw(uint32_t addr, void *priv)
     sst_t   *dev = (sst_t *) priv;
     uint16_t ret = 0xffff;
 
+    if (!flash_bios_read_selected(addr))
+        return 0xffff;
+
     addr &= 0x000fffff;
 
     if (dev->id_mode)
@@ -471,6 +484,9 @@ sst_readl(uint32_t addr, void *priv)
 {
     sst_t   *dev = (sst_t *) priv;
     uint32_t ret = 0xffffffff;
+
+    if (!flash_bios_read_selected(addr))
+        return 0xffffffff;
 
     addr &= 0x000fffff;
 
@@ -502,22 +518,40 @@ sst_add_mappings(sst_t *dev)
         memcpy(&dev->array[fbase], &rom[base & biosmask], 0x10000);
 
         if (base >= 0xe0000) {
+            dev->exec[i] = dev->array + fbase;
             mem_mapping_add(&(dev->mapping[i]), base, 0x10000,
                             sst_read, sst_readw, sst_readl,
                             sst_write, NULL, NULL,
                             dev->array + fbase, MEM_MAPPING_EXTERNAL | MEM_MAPPING_ROM | MEM_MAPPING_ROMCS | MEM_MAPPING_ROM_WS, (void *) dev);
         }
         if (is6117) {
+            dev->exec_h[i] = dev->array + fbase;
             mem_mapping_add(&(dev->mapping_h[i]), (base | 0xf00000), 0x10000,
                             sst_read, sst_readw, sst_readl,
                             sst_write, NULL, NULL,
                             dev->array + fbase, MEM_MAPPING_EXTERNAL | MEM_MAPPING_ROM | MEM_MAPPING_ROMCS | MEM_MAPPING_ROM_WS, (void *) dev);
         } else {
+            dev->exec_h[i] = dev->array + fbase;
             mem_mapping_add(&(dev->mapping_h[i]), (base | (cpu_16bitbus ? 0xf00000 : 0xfff00000)), 0x10000,
                             sst_read, sst_readw, sst_readl,
                             sst_write, NULL, NULL,
                             dev->array + fbase, MEM_MAPPING_EXTERNAL | MEM_MAPPING_ROM | MEM_MAPPING_ROMCS | MEM_MAPPING_ROM_WS, (void *) dev);
         }
+    }
+}
+
+/* The chip select changed: keep an exec pointer only on a mapping the
+   chipset decodes whole (flash_bios_mapping_update). */
+static void
+sst_decode_hook(void *priv)
+{
+    sst_t *dev = (sst_t *) priv;
+
+    for (uint8_t i = 0; i < 8; i++) {
+        if (dev->mapping[i].size)
+            flash_bios_mapping_update(&dev->mapping[i], dev->exec[i]);
+        if (dev->mapping_h[i].size)
+            flash_bios_mapping_update(&dev->mapping_h[i], dev->exec_h[i]);
     }
 }
 
@@ -553,16 +587,33 @@ sst_init(const device_t *info)
 
     sst_add_mappings(dev);
 
-    fp = nvr_fopen(flash_path, "rb");
-    if (fp) {
-        if (fread(&(dev->array[0x00000]), 1, dev->size, fp) != dev->size)
-            pclog("Less than %i bytes read from the SST Flash ROM file\n", dev->size);
-        fclose(fp);
+    if (strlen(flash_path) > 0) {
+        fp = nvr_fopen(flash_path, "rb");
+        if (fp != NULL) {
+            if (!dump_missing)
+                (void) !fread(&(dev->array[0x00000]), 1, dev->size, fp);
+        } else if (!dump_missing)
+            dev->dirty = 1;
     } else
-        dev->dirty = 1; /* It is by definition dirty on creation. */
+        fatal("Attempting to open the Flash file for reading with an empty invalid name\n");
+
+    /* Set the requested logo display */
+    if ((machines[machine].init == machine_at_in530_init) &&
+        (info->local == (AMD | AMD29F002NBT | SIZE_2M))) {
+        const uint8_t old = dev->array[0x3af70];
+
+        dev->array[0x3af70] &= 0xf0;
+        dev->array[0x3af70] |= machine_in530_boot_logo() & 0x0f;
+
+        if (dev->array[0x3af70] != old)
+            dev->dirty = 1;
+    }
 
     if (!dev->is_39)
         timer_add(&dev->page_write_timer, sst_page_write, dev, 0);
+
+    flash_bios_set_decode_hook(sst_decode_hook, dev);
+    sst_decode_hook(dev);
 
     return dev;
 }
@@ -570,15 +621,21 @@ sst_init(const device_t *info)
 static void
 sst_close(void *priv)
 {
-    FILE  *fp;
     sst_t *dev = (sst_t *) priv;
 
+    flash_bios_set_decode_hook(NULL, NULL);
+
     if (dev->dirty) {
-        fp = nvr_fopen(flash_path, "wb");
-        if (fp != NULL) {
-            fwrite(&(dev->array[0x00000]), dev->size, 1, fp);
-            fclose(fp);
-        }
+        if (strlen(flash_path) > 0) {
+            FILE *fp = nvr_fopen(flash_path, "wb");
+            if (fp != NULL) {
+                if (!dump_missing)
+                    fwrite(&(dev->array[0x00000]), dev->size, 1, fp);
+                fclose(fp);
+            } else if (!dump_missing)
+                warning("Unable to open %s for writing, please make sure your NVR folder is writable\n", flash_path);
+        } else
+            fatal("Attempting to open the Flash file for writing with an empty invalid name\n");
     }
 
     free(dev->array);
@@ -1043,3 +1100,17 @@ const device_t amd_flash_29f020a_device = {
     .force_redraw  = NULL,
     .config        = NULL
 };
+const device_t amd_flash_29f002nbt_device = {
+    .name          = "AMD Am29F002NBT Flash BIOS",
+    .internal_name = "amd_flash_29f002nbt",
+    .flags         = 0,
+    .local         = AMD | AMD29F002NBT | SIZE_2M,
+    .init          = sst_init,
+    .close         = sst_close,
+    .reset         = NULL,
+    .available     = NULL,
+    .speed_changed = NULL,
+    .force_redraw  = NULL,
+    .config        = NULL
+};
+

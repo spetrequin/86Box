@@ -195,7 +195,6 @@ typedef struct _mem_mapping_ {
     void *priv; /* backpointer to device */
 } mem_mapping_t;
 
-#ifdef USE_NEW_DYNAREC
 extern uint64_t *byte_dirty_mask;
 extern uint64_t *byte_code_present_mask;
 
@@ -211,10 +210,10 @@ typedef struct page_t {
 
     uint8_t *mem;
 
-    uint16_t block, block_2;
+    uint32_t block, block_2;
 
     /*Head of codeblock tree associated with this page*/
-    uint16_t head;
+    uint32_t head;
 
     uint64_t code_present_mask;
     uint64_t dirty_mask;
@@ -234,24 +233,6 @@ page_in_evict_list(page_t *page)
 }
 void page_remove_from_evict_list(page_t *page);
 void page_add_to_evict_list(page_t *page);
-#else
-typedef struct _page_ {
-    void (*write_b)(uint32_t addr, uint8_t val, struct _page_ *page);
-    void (*write_w)(uint32_t addr, uint16_t val, struct _page_ *page);
-    void (*write_l)(uint32_t addr, uint32_t val, struct _page_ *page);
-
-    uint8_t *mem;
-
-    uint64_t code_present_mask[4];
-    uint64_t dirty_mask[4];
-
-    struct codeblock_t *block[4];
-    struct codeblock_t *block_2[4];
-
-    /*Head of codeblock tree associated with this page*/
-    struct codeblock_t *head;
-} page_t;
-#endif
 
 extern uint8_t *ram;
 extern uint32_t rammask;
@@ -260,10 +241,9 @@ extern uint8_t *rom;
 extern uint32_t biosmask;
 extern uint32_t biosaddr;
 
-extern int        readlookup[256];
+extern int        readlookup[512];
 extern uintptr_t  old_rl2;
-extern uint8_t    uncached;
-extern int        readlnext;
+extern int        readlnext[2];
 extern int        writelookup[256];
 
 extern int        writelnext;
@@ -283,7 +263,7 @@ extern page_t  *pages;
 
 /* The lookup tables. */
 extern page_t *page_lookup[1048576];
-extern uintptr_t readlookup2[1048576];
+extern uintptr_t readlookup2[2097152];
 extern uintptr_t writelookup2[1048576];
 
 extern uint32_t get_phys_virt;
@@ -307,6 +287,8 @@ extern int mem_a20_state;
 extern int mem_a20_alt;
 extern int mem_a20_chipset;
 extern int mem_a20_key;
+
+extern int is_compare;
 
 extern uint8_t  read_mem_b(uint32_t addr);
 extern uint16_t read_mem_w(uint32_t addr);
@@ -350,6 +332,7 @@ extern void     writememll_no_mmut_2386(uint32_t addr, uint32_t *a64, uint32_t v
 extern void     do_mmutranslate_2386(uint32_t addr, uint32_t *a64, int num, int write);
 
 extern uint8_t *getpccache(uint32_t a);
+extern int      cpu_fetch_device;
 extern uint64_t mmutranslatereal(uint32_t addr, int rw);
 extern uint32_t mmutranslatereal32(uint32_t addr, int rw);
 extern void     addreadlookup(uint32_t virt, uint32_t phys);
@@ -437,6 +420,9 @@ extern void mem_flush_write_page(uint32_t addr, uint32_t virt);
 extern void mem_reset_page_blocks(void);
 
 extern void flushmmucache(void);
+extern uint64_t pae_pdpte[4];
+extern int      pae_check_load(uint32_t cr3_val);
+extern void     pae_load_pdptes(void);
 extern void flushmmucache_write(void);
 extern void flushmmucache_pc(void);
 extern void flushmmucache_nopc(void);
@@ -445,6 +431,7 @@ extern void mem_debug_check_addr(uint32_t addr, int write);
 
 extern void mem_a20_init(void);
 extern void mem_a20_recalc(void);
+extern void mem_a20_reset_vector_bypass_once(void);
 
 extern void mem_init(void);
 extern void mem_close(void);

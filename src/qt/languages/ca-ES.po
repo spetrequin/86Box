@@ -66,17 +66,23 @@ msgstr "Re&nderitzador"
 msgid "&Qt (Software)"
 msgstr "&Qt (Programari)"
 
-msgid "Open&GL (3.0 Core)"
-msgstr "Open&GL (3.0 Core)"
+msgid "Open&GL"
+msgstr "Open&GL"
 
-msgid "&VNC"
-msgstr "&VNC"
+msgid "&Vulkan"
+msgstr "&Vulkan"
+
+msgid "V&NC"
+msgstr "V&NC"
 
 msgid "Specify &dimensions…"
 msgstr "E&specifica dimensions…"
 
 msgid "Force &4:3 display ratio"
 msgstr "Força ràtio de visualització &4:3"
+
+msgid "Force &%1:%2 display ratio"
+msgstr "Força ràtio de visualització &%1:%2"
 
 msgid "&Window scale factor"
 msgstr "&Factor de escalat de finestra"
@@ -420,8 +426,11 @@ msgstr "Activat (UTC)"
 msgid "Use the 486 interpreter for 286 and 386 processors"
 msgstr "Utilitzeu l'intèrpret 486 per a processadors 286 i 386"
 
-msgid "Dynamic Recompiler"
+msgid "Dynamic recompiler"
 msgstr "Recompilador dinàmic"
+
+msgid "Accurate FPU environment on the dynamic recompiler"
+msgstr ""
 
 msgid "CPU frame size"
 msgstr "Mida de blocs de la CPU"
@@ -453,6 +462,9 @@ msgstr "Gràfics XGA"
 msgid "IBM PS/55 Display Adapter Graphics"
 msgstr "Adaptador de gràfics de pantalla IBM PS/55"
 
+msgid "SCSI:"
+msgstr "SCSI:"
+
 msgid "Voodoo:"
 msgstr "Voodoo:"
 
@@ -467,6 +479,21 @@ msgstr "Ratolí:"
 
 msgid "Mouse"
 msgstr "Ratolí"
+
+msgid "&Mouse"
+msgstr "&Ratolí"
+
+msgid "Tablet:"
+msgstr ""
+
+msgid "Tablet"
+msgstr ""
+
+msgid "&Tablet"
+msgstr ""
+
+msgid "Tablet (&Crosshair)"
+msgstr ""
 
 msgid "Joystick:"
 msgstr "Comandament:"
@@ -828,6 +855,9 @@ msgstr "Pantalla"
 msgid "Input devices"
 msgstr "Dispositius de entrada"
 
+msgid "Input &device"
+msgstr ""
+
 msgid "Sound"
 msgstr "So"
 
@@ -836,6 +866,9 @@ msgstr "Xarxa"
 
 msgid "Ports (COM & LPT)"
 msgstr "Ports (COM i LPT)"
+
+msgid "Port"
+msgstr ""
 
 msgid "Ports"
 msgstr "Ports"
@@ -911,6 +944,9 @@ msgstr "Premeu %1 per alliberar el ratolí"
 
 msgid "Press %1 or middle button to release mouse"
 msgstr "Premeu %1 o bé el botó central per alliberar el ratolí"
+
+msgid "Press %1 or side button to release mouse"
+msgstr ""
 
 msgid "Bus"
 msgstr "Bus"
@@ -1238,6 +1274,9 @@ msgstr "No fou possible obrir el fitxer de configuració seleccionat per llegir:
 msgid "Use regular expressions in search box"
 msgstr "Utilitzeu expressions regulars a la caixa de cerca"
 
+msgid "Delete virtual machines to Recycle Bin"
+msgstr ""
+
 msgid "%n machine(s) are currently active. Are you sure you want to exit the VM manager anyway?"
 msgid_plural "%n machines are currently active. Are you sure you want to exit the VM manager anyway?"
 msgstr[0] "%n màquina és activa en aquest moment. Segur que voleu sortir de l'administrador de MV?"
@@ -1411,8 +1450,11 @@ msgstr "Finalitzar forçosament la màquina virtual pot causar la pèrdua de dad
 msgid "&Delete"
 msgstr "&Suprimir"
 
-msgid "Do you really want to delete the virtual machine \"%1\" and all its files? This action cannot be undone!"
-msgstr "Realment voleu suprimir la màquina virtual \"%1\" i tots els seus fitxers? Aquesta acció no es pot desfer!"
+msgid "Do you really want to delete the virtual machine \"%1\" and all its files?"
+msgstr "Realment voleu suprimir la màquina virtual \"%1\" i tots els seus fitxers?"
+
+msgid "This action cannot be undone!"
+msgstr "Aquesta acció no es pot desfer!"
 
 msgid "Show &config file"
 msgstr "Mostra fitxer de &configuració"
@@ -1452,6 +1494,18 @@ msgstr "Apagada ACPI"
 
 msgid "ACP&I shutdown"
 msgstr "Apagada ACP&I"
+
+msgid "Power off"
+msgstr ""
+
+msgid "Power &off…"
+msgstr ""
+
+msgid "Power &off"
+msgstr ""
+
+msgid "Powering off the emulated machine may cause data loss. Are you sure you want to continue?"
+msgstr ""
 
 msgid "Hard disk (%1)"
 msgstr "Disc dur (%1)"
@@ -2232,6 +2286,9 @@ msgstr "Número de sèrie"
 msgid "Host ID"
 msgstr "ID de l'amfitrió"
 
+msgid "Host"
+msgstr ""
+
 msgid "FDC Address"
 msgstr "Adreça del FDC"
 
@@ -2661,6 +2718,18 @@ msgstr "Color millorat - modalitat normal (5154/ECD)"
 msgid "Enhanced Color - Enhanced Mode (5154/ECD)"
 msgstr "Color millorat - modalitat millorada (5154/ECD)"
 
+msgid "IBM 8507 (1024x768, Monochrome)"
+msgstr "IBM 8507 (1024x768, monocromàtic)"
+
+msgid "IBM 8514 (1024x768, Color)"
+msgstr "IBM 8514 (1024x768, color)"
+
+msgid "IBM 8503 (640x480, Monochrome)"
+msgstr "IBM 8503 (640x480, monocromàtic)"
+
+msgid "IBM 8512/13 (640x480, Color)"
+msgstr "IBM 8512/13 (640x480, color)"
+
 msgid "Green"
 msgstr "Verd"
 
@@ -2859,8 +2928,14 @@ msgstr "[Genèric] 1989 (3500 RPM)"
 msgid "[Generic] 1992 (3600 RPM)"
 msgstr "[Genèric] 1992 (3600 RPM)"
 
+msgid "[Generic] 1993 (4000 RPM)"
+msgstr "[Genèric] 1993 (4000 RPM)"
+
 msgid "[Generic] 1994 (4500 RPM)"
 msgstr "[Genèric] 1994 (4500 RPM)"
+
+msgid "[Generic] 1995 (5200 RPM)"
+msgstr "[Genèric] 1995 (5200 RPM)"
 
 msgid "[Generic] 1996 (5400 RPM)"
 msgstr "[Genèric] 1996 (5400 RPM)"
@@ -2873,6 +2948,9 @@ msgstr "[Genèric] 1998 (5400 RPM)"
 
 msgid "[Generic] 2000 (7200 RPM)"
 msgstr "[Genèric] 2000 (7200 RPM)"
+
+msgid "[Generic] 2004 (10000 RPM)"
+msgstr "[Genèric] 2004 (10000 RPM)"
 
 msgid "IBM 8514/A clone"
 msgstr "Clon IBM 8514/A"
@@ -2913,6 +2991,9 @@ msgstr "Demana confirmació abans de la reiniciació completa"
 msgid "Ask for confirmation before quitting"
 msgstr "Demana confirmació abans de sortir"
 
+msgid "Precache CHD files into memory"
+msgstr ""
+
 msgid "Options"
 msgstr "Opcions"
 
@@ -2922,8 +3003,35 @@ msgstr "Model"
 msgid "Model:"
 msgstr "Model:"
 
+msgid "Brand:"
+msgstr ""
+
+msgid "Revision:"
+msgstr ""
+
+msgid "[Generic HDD] Device Configuration"
+msgstr ""
+
 msgid "Failed to initialize Vulkan renderer."
 msgstr "Error en inicialitzar el renderitzador Vulkan."
+
+msgid "Failed to create Vulkan 1.3 instance."
+msgstr ""
+
+msgid "No usable Vulkan physical devices found."
+msgstr ""
+
+msgid "No Vulkan-capable physical devices found."
+msgstr ""
+
+msgid "librashader not found. Shaders will not be available."
+msgstr ""
+
+msgid "Vulkan device lost."
+msgstr ""
+
+msgid "Vulkan surface lost."
+msgstr ""
 
 msgid "GLSL Error"
 msgstr "Error de GLSL"
@@ -2945,6 +3053,9 @@ msgstr "Administrador de shaders"
 
 msgid "Shader Configuration"
 msgstr "Configuració de shaders"
+
+msgid "GPU:"
+msgstr ""
 
 msgid "Add"
 msgstr "Afegeix"
@@ -3218,6 +3329,12 @@ msgstr "&Avançar ràpidament"
 msgid "Fast forward"
 msgstr "Avançar ràpidament"
 
+msgid "&Non-maskable interrupt"
+msgstr ""
+
+msgid "Non-maskable interrupt"
+msgstr ""
+
 msgid "To change the system directory, stop all running machines."
 msgstr "Per canviar el directori del sistema, atureu totes les màquines en funcionament."
 
@@ -3249,6 +3366,9 @@ msgid "Unable to load image \"%s\": %1 is missing, which is required for Daemon 
 msgstr ""
 "No ha esta possible carregar la imatge \"%s\": falta %1, que és necessari "
 "per donar suport a les imatges Daemon Tools MDS v2 i MDX."
+
+msgid "Unable to load image \"%s\": %1 is missing, which is required for Aaru format image support."
+msgstr ""
 
 msgid "The DVD image \"%s\" has been inserted into a drive that does not support DVD media and will be ignored."
 msgstr ""
@@ -3394,4 +3514,82 @@ msgid "938 (Traditional Chinese)"
 msgstr "938 (xinès tradicional)"
 
 msgid "Sample rate:"
+msgstr ""
+
+msgid "Enable audio input (mic/line-in)"
+msgstr ""
+
+msgid "Audio input device:"
+msgstr ""
+
+msgid "Audio input sample rate:"
+msgstr ""
+
+msgid "Rate the emulator mixes to the host output device."
+msgstr ""
+
+msgid "Rate the host input capture device is opened at.\n\n44100 divides evenly by SB16/AWE32 rates of 44.1/22/11 kHz."
+msgstr ""
+
+msgid "CGA lightpen"
+msgstr ""
+
+msgid "Luminance threshold (%)"
+msgstr ""
+
+msgid "VFIO: Could not open /dev/vfio/vfio: %s. Make sure the vfio-pci module is loaded."
+msgstr ""
+
+msgid "VFIO %s: Invalid device location."
+msgstr ""
+
+msgid "VFIO %s: Device not found."
+msgstr ""
+
+msgid "VFIO %s: Device has no IOMMU group. Make sure VT-d or IOMMU is enabled on your system."
+msgstr ""
+
+msgid "VFIO %s: Device is not bound to vfio-pci."
+msgstr ""
+
+msgid "VFIO %s: Could not open IOMMU group %d: %s"
+msgstr ""
+
+msgid "VFIO %s: IOMMU group %d is not viable. All devices in the group must be bound to vfio-pci."
+msgstr ""
+
+msgid "VFIO: Could not map guest memory for DMA: %s. The locked memory limit (ulimit -l) may be too low."
+msgstr ""
+
+msgid "VFIO %s: Could not read ROM file \"%s\"; using the device's own ROM."
+msgstr ""
+
+msgid "VFIO %s: Could not read ROM file \"%s\"; the ROM is disabled."
+msgstr ""
+
+msgid "VFIO %s: The ROM looks invalid. A custom ROM can be loaded through the VFIO settings."
+msgstr ""
+
+msgid "VFIO: These devices must be bound to vfio-pci, which requires administrator rights:\n\n%s\nBind them now?"
+msgstr ""
+
+msgid "VFIO: Administrator rights are required to give 86Box access to the passed-through devices. Continue?"
+msgstr ""
+
+msgid "These devices were not selected, but share an IOMMU group with a selected device, so they will be bound as well:"
+msgstr ""
+
+msgid "VFIO %s: IOMMU group %d also contains %s, which the host needs. The group will not be bound to vfio-pci."
+msgstr ""
+
+msgid "VFIO: Could not prepare the devices for passthrough:\n%s"
+msgstr ""
+
+msgid "VFIO: Administrator rights could not be requested. To prepare the devices for passthrough, run this command, then hard reset:\n\n%s"
+msgstr ""
+
+msgid "Prepare PCI devices for VFIO passthrough"
+msgstr ""
+
+msgid "Authentication is required to prepare PCI devices for passthrough to 86Box."
 msgstr ""

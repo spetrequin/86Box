@@ -47,8 +47,9 @@ extern const device_t st506_xt_toshiba_t1200_device;      /* st506_xt_toshiba_t1
 extern const device_t st506_ps2_device;                   /* st506_mca */
 
 extern const device_t esdi_at_wd1007vse1_device; /* esdi_at */
+extern const device_t esdi_integrated_device;    /* esdi_mca */
+extern const device_t esdi_upgrade_device;       /* esdi_mca */
 extern const device_t esdi_ps2_device;           /* esdi_mca */
-extern const device_t esdi_integrated_device;           /* esdi_mca */
 
 extern const device_t ide_isa_device;         /* isa_ide */
 extern const device_t ide_isa_sec_device;     /* isa_ide sec*/
@@ -80,9 +81,11 @@ extern const device_t ide_cmd646_device;                        /* CMD PCI-646 *
 extern const device_t ide_cmd646_legacy_only_device;            /* CMD PCI-646 (Legacy Mode Only) */
 extern const device_t ide_cmd646_single_channel_device;         /* CMD PCI-646 (Only primary channel) */
 extern const device_t ide_cmd646_ter_qua_device;                /* CMD PCI-646 (Tertiary and quaternary channels) */
+extern const device_t pdc20269_device;                          /* Promise Ultra133 TX2 */
 extern const device_t ide_cmd648_ter_qua_device;                /* CMD PCI-648 (Tertiary and quaternary channels) */
 extern const device_t ide_cmd648_ter_qua_onboard_device;        /* CMD PCI-648 (Tertiary and quaternary channels, on-board) */
 extern const device_t ide_cmd649_ter_qua_device;                /* CMD PCI-649 (Tertiary and quaternary channels) */
+extern const device_t ide_hpt366_ter_qua_onboard_device;        /* HighPoint HPT366 (Tertiary and quaternary channels, on-board) */
 
 extern const device_t ide_pc87410_device;                       /* National Semiconductor PC87410 PCI */
 
@@ -132,6 +135,8 @@ extern int             hdc_has_config(int hdc);
 extern const device_t *hdc_get_device(int hdc);
 extern int             hdc_get_flags(int hdc);
 extern int             hdc_available(int hdc);
+
+extern void            ps1_hdc_handler(void *priv, int set);
 
 extern void xta_handler(void *priv, int set);
 

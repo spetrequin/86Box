@@ -38,19 +38,22 @@ typedef struct codeblock_t {
     uint16_t flags;
     uint8_t  ins;
     uint8_t  TOP;
-#if defined(__aarch64__) || defined(_M_ARM64)
-    /* ARM64-only: per-block retry counter used to delay NO_IMMEDIATES
-      promotion until churn repeats, reducing premature slow-immediate mode. */
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(__loongarch_lp64)
+    /* ARM64/LoongArch64: per-block retry counter used to delay
+       NO_IMMEDIATES promotion until churn repeats, reducing premature
+       slow-immediate mode. (The 386_dynarec.c policy consuming these
+       fields is currently ARM64-only; LoongArch64 wires it up in M5.) */
     uint8_t  dirty_list_recompile_hits;
-    /* ARM64-only: tracks the most recent dirty-list epoch seen by this
-      block so promotion can require a dense burst, not stale spaced-out hits. */
+    /* ARM64/LoongArch64: tracks the most recent dirty-list epoch seen by
+       this block so promotion can require a dense burst, not stale
+       spaced-out hits. */
     uint16_t dirty_list_last_epoch;
 #endif
     int      valid;
 
     /*Pointers for codeblock tree, used to search for blocks when hash lookup
       fails.*/
-    uint16_t parent, left, right;
+    uint32_t parent, left, right;
 
     uint8_t *data;
 
@@ -60,17 +63,21 @@ typedef struct codeblock_t {
     /*Previous and next pointers, for the codeblock list associated with
       each physical page. Two sets of pointers, as a codeblock can be
       present in two pages.*/
-    uint16_t prev, next;
-    uint16_t prev_2, next_2;
+    uint32_t prev, next;
+    uint32_t prev_2, next_2;
 
     /*First mem_block_t used by this block. Any subsequent mem_block_ts
       will be in the list starting at head_mem_block->next.*/
     struct mem_block_t *head_mem_block;
+
+    /*Run since eviction's sweep last passed it: the sweep passes it over
+      once (codegen_delete_random_block).*/
+    uint8_t used;
 } codeblock_t;
 
 extern codeblock_t *codeblock;
 
-extern uint16_t *codeblock_hash;
+extern uint32_t *codeblock_hash;
 
 extern uint8_t *block_write_data;
 
@@ -167,7 +174,7 @@ codeblock_tree_add(codeblock_t *new_block)
 static inline void
 codeblock_tree_delete(codeblock_t *block)
 {
-    uint16_t     parent_nr = block->parent;
+    uint32_t     parent_nr = block->parent;
     codeblock_t *parent;
 
     if (block->parent)
@@ -180,7 +187,7 @@ codeblock_tree_delete(codeblock_t *block)
         if (!parent)
             pages[block->phys >> 12].head = BLOCK_INVALID;
         else {
-            uint16_t block_nr = get_block_nr(block);
+            uint32_t block_nr = get_block_nr(block);
 
             if (parent->left == block_nr)
                 parent->left = BLOCK_INVALID;
@@ -194,7 +201,7 @@ codeblock_tree_delete(codeblock_t *block)
             pages[block->phys >> 12].head                   = block->right;
             codeblock[pages[block->phys >> 12].head].parent = BLOCK_INVALID;
         } else {
-            uint16_t block_nr = get_block_nr(block);
+            uint32_t block_nr = get_block_nr(block);
 
             if (parent->left == block_nr) {
                 parent->left                   = block->right;
@@ -212,7 +219,7 @@ codeblock_tree_delete(codeblock_t *block)
             pages[block->phys >> 12].head                   = block->left;
             codeblock[pages[block->phys >> 12].head].parent = BLOCK_INVALID;
         } else {
-            uint16_t block_nr = get_block_nr(block);
+            uint32_t block_nr = get_block_nr(block);
 
             if (parent->left == block_nr) {
                 parent->left                   = block->left;
@@ -229,7 +236,7 @@ codeblock_tree_delete(codeblock_t *block)
         codeblock_t *lowest = &codeblock[block->right];
         codeblock_t *highest;
         codeblock_t *old_parent;
-        uint16_t     lowest_nr;
+        uint32_t     lowest_nr;
 
         while (lowest->left)
             lowest = &codeblock[lowest->left];
@@ -241,7 +248,7 @@ codeblock_tree_delete(codeblock_t *block)
         if (!parent_nr)
             pages[block->phys >> 12].head = lowest_nr;
         else {
-            uint16_t block_nr = get_block_nr(block);
+            uint32_t block_nr = get_block_nr(block);
 
             if (parent->left == block_nr)
                 parent->left = lowest_nr;

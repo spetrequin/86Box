@@ -26,6 +26,7 @@ extern "C" {
 #include <86box/cdrom.h>
 #include <86box/cdrom_interface.h>
 #include <86box/fdd.h>
+#include <86box/lpt.h>
 #include <86box/hdc.h>
 #include <86box/scsi.h>
 #include <86box/scsi_device.h>
@@ -41,6 +42,8 @@ extern "C" {
 #include <86box/config.h>
 
 extern volatile int fdcinited;
+extern bool         fast_forward;
+extern int          is_dynarec_active(void);
 };
 
 #include <QIcon>
@@ -111,11 +114,14 @@ struct Pixmaps {
     PixmapSetEmptyActive rdisk_disabled;
     PixmapSetEmptyActive rdisk;
     PixmapSetEmptyActive zip;
+    PixmapSetEmptyActive jaz;
+    PixmapSetEmptyActive syquest;
     PixmapSetEmptyActive mo;
     PixmapSetEmptyActive tape;
     PixmapSetActive      hd;
     PixmapSetEmptyActive net;
     PixmapSetDisabled    sound;
+    PixmapSetDisabled    dynarec;
 };
 
 struct StateActive {
@@ -342,11 +348,15 @@ struct MachineStatus::States {
         pixmaps.rdisk_disabled.empty_read_write_active = pixmaps.rdisk_disabled.normal;
         pixmaps.rdisk.load(QIcon(":/settings/qt/icons/rdisk.ico"));
         pixmaps.zip.load(QIcon(":/settings/qt/icons/zip.ico"));
+        pixmaps.jaz.load(QIcon(":/settings/qt/icons/jaz.ico"));
+        pixmaps.syquest.load(QIcon(":/settings/qt/icons/syquest.ico"));
         pixmaps.mo.load(QIcon(":/settings/qt/icons/mo.ico"));
         pixmaps.tape.load(QIcon(":/settings/qt/icons/tape.ico"));
         pixmaps.hd.load(QIcon(":/settings/qt/icons/hard_disk.ico"));
         pixmaps.net.load(QIcon(":/settings/qt/icons/network.ico"));
         pixmaps.sound.load(QIcon(":/settings/qt/icons/sound.ico"));
+        pixmaps.dynarec.normal                          = QIcon(":/menuicons/qt/icons/recompiler.ico").pixmap(pixmap_size);
+        pixmaps.dynarec.disabled                        = QIcon(":/menuicons/qt/icons/interpreter.ico").pixmap(pixmap_size);
 
         cartridge[0].pixmaps = &pixmaps.cartridge;
         cartridge[1].pixmaps = &pixmaps.cartridge;
@@ -384,6 +394,7 @@ struct MachineStatus::States {
     std::array<StateActive, HDD_BUS_USB>       hdds;
     std::array<StateEmptyActive, NET_CARD_MAX> net;
     std::unique_ptr<ClickableLabel>            sound;
+    std::unique_ptr<ClickableLabel>            dynarec;
     std::unique_ptr<QLabel>                    text;
 };
 
@@ -393,6 +404,7 @@ MachineStatus::MachineStatus(QObject *parent)
 {
     d         = std::make_unique<MachineStatus::States>(this);
     soundMenu = nullptr;
+    dynarecMenu = nullptr;
     connect(refreshTimer, &QTimer::timeout, this, &MachineStatus::refreshIcons);
     refreshTimer->start(75);
 }
@@ -403,6 +415,12 @@ void
 MachineStatus::setSoundMenu(QMenu *menu)
 {
     soundMenu = menu;
+}
+
+void
+MachineStatus::setDynarecMenu(QMenu *menu)
+{
+    dynarecMenu = menu;
 }
 
 bool
@@ -430,7 +448,7 @@ MachineStatus::iterateFDD(const std::function<void(int)> &cb)
         return;
 
     for (int i = 0; i < FDD_NUM; ++i) {
-        if (fdd_get_type(i) != 0) {
+        if (fdd_get_type(&drives[i]) != 0) {
             cb(i);
         }
     }
@@ -452,7 +470,8 @@ MachineStatus::iterateCDROM(const std::function<void(int)> &cb)
             (scsi_card_current[0] == 0) && (scsi_card_current[1] == 0) &&
             (scsi_card_current[2] == 0) && (scsi_card_current[3] == 0))
             continue;
-        if ((cdrom[i].bus_type == CDROM_BUS_MITSUMI || cdrom[i].bus_type == CDROM_BUS_MKE) && (cdrom_interface_current == 0))
+        if ((cdrom[i].bus_type == CDROM_BUS_SONY || cdrom[i].bus_type == CDROM_BUS_CM100 || cdrom[i].bus_type == CDROM_BUS_PHILIPS || cdrom[i].bus_type == CDROM_BUS_HITACHI || cdrom[i].bus_type == CDROM_BUS_MITSUMI || cdrom[i].bus_type == CDROM_BUS_MKE) && (cdrom_interface_current == 0) &&
+            !((cdrom[i].bus_type == CDROM_BUS_MITSUMI) && (machines[machine].init == machine_at_tandy_vis_init)))
             continue;
         if (cdrom[i].bus_type != 0) {
             cb(i);
@@ -519,6 +538,10 @@ MachineStatus::iterateTape(const std::function<void(int)> &cb)
         if ((tape_drives[i].bus_type == TAPE_BUS_SCSI) && !hasSCSI() &&
             (scsi_card_current[0] == 0) && (scsi_card_current[1] == 0) &&
             (scsi_card_current[2] == 0) && (scsi_card_current[3] == 0))
+            continue;
+        /* A parallel-port tape needs the port it sits on to exist. */
+        if ((tape_drives[i].bus_type == TAPE_BUS_LPT) &&
+            !lpt_ports[tape_drives[i].lpt_port].enabled)
             continue;
         if (tape_drives[i].bus_type != 0) {
             cb(i);
@@ -593,6 +616,17 @@ MachineStatus::refreshIcons()
     if (cassette_enable && cassette) {
         d->cassette.setRecord(!!cassette->save);
         d->cassette.setPlay(!cassette->save);
+    }
+
+    /* Same for sound mute status. */
+    if (d->sound)
+        d->sound->setPixmap((sound_muted || fast_forward) ? d->pixmaps.sound.disabled : d->pixmaps.sound.normal);
+
+    if (d->dynarec) {
+        d->dynarec->setVisible(cpu_use_dynarec);
+        d->dynarec->setPixmap(!is_dynarec_active() ? d->pixmaps.dynarec.disabled : d->pixmaps.dynarec.normal);
+        d->dynarec->setToolTip(is_dynarec_active() ? tr("Dynamic recompiler is active") :
+                                                     tr("Dynamic recompiler is inactive"));
     }
 
     /* Check if icons should show activity. */
@@ -732,6 +766,7 @@ MachineStatus::refresh(QStatusBar *sbar)
     for (size_t i = 0; i < NET_CARD_MAX; i++) {
         sbar->removeWidget(d->net[i].label.get());
     }
+    sbar->removeWidget(d->dynarec.get());
     sbar->removeWidget(d->sound.get());
 
     if (cassette_enable) {
@@ -773,7 +808,8 @@ MachineStatus::refresh(QStatusBar *sbar)
     }
 
     iterateFDD([this, sbar](int i) {
-        int t = fdd_get_type(i);
+        fdd_drive_t *drv = &drives[i];
+        int t = fdd_get_type(drv);
         if (t == 0)
             d->fdd[i].pixmaps = &d->pixmaps.floppy_disabled;
         else if ((t >= 1) && (t <= 6))
@@ -781,13 +817,13 @@ MachineStatus::refresh(QStatusBar *sbar)
         else
             d->fdd[i].pixmaps = &d->pixmaps.floppy_35;
         d->fdd[i].label = std::make_unique<ClickableLabel>();
-        d->fdd[i].setEmpty(QString(floppyfns[i]).isEmpty());
-        if (QString(floppyfns[i]).isEmpty())
+        d->fdd[i].setEmpty(QString(drv->image_path).isEmpty());
+        if (QString(drv->image_path).isEmpty())
             d->fdd[i].setWriteProtected(false);
-        else if (QString(floppyfns[i]).left(5) == "wp://")
+        else if (QString(drv->image_path).left(5) == "wp://")
             d->fdd[i].setWriteProtected(true);
         else
-            d->fdd[i].setWriteProtected(ui_writeprot[i]);
+            d->fdd[i].setWriteProtected(drv->read_only);
         d->fdd[i].setActive(false);
         d->fdd[i].setWriteActive(false);
         d->fdd[i].refresh();
@@ -830,6 +866,10 @@ MachineStatus::refresh(QStatusBar *sbar)
             d->rdisk[i].pixmaps = &d->pixmaps.rdisk_disabled;
         else if ((t == RDISK_TYPE_ZIP_100) || (t == RDISK_TYPE_ZIP_250))
             d->rdisk[i].pixmaps = &d->pixmaps.zip;
+        else if ((t == RDISK_TYPE_JAZ_1GB) || (t == RDISK_TYPE_JAZ_2GB))
+            d->rdisk[i].pixmaps = &d->pixmaps.jaz;
+		else if ((t == RDISK_TYPE_SYJET_1_5GB) || (t == RDISK_TYPE_SPARQ_1GB))
+            d->rdisk[i].pixmaps = &d->pixmaps.syquest;
         else
             d->rdisk[i].pixmaps = &d->pixmaps.rdisk;
         d->rdisk[i].label = std::make_unique<ClickableLabel>();
@@ -1020,7 +1060,7 @@ MachineStatus::refresh(QStatusBar *sbar)
     }
 
     d->sound = std::make_unique<ClickableLabel>();
-    d->sound->setPixmap(sound_muted ? d->pixmaps.sound.disabled : d->pixmaps.sound.normal);
+    d->sound->setPixmap((sound_muted || fast_forward) ? d->pixmaps.sound.disabled : d->pixmaps.sound.normal);
 
     connect(d->sound.get(), &ClickableLabel::clicked, this, [this](QPoint pos) {
         this->soundMenu->popup(pos - QPoint(0, this->soundMenu->sizeHint().height()));
@@ -1028,6 +1068,20 @@ MachineStatus::refresh(QStatusBar *sbar)
 
     d->sound->setToolTip(tr("Sound"));
     sbar->addWidget(d->sound.get());
+
+    d->dynarec = std::make_unique<ClickableLabel>();
+    d->dynarec->setPixmap(!is_dynarec_active() ? d->pixmaps.dynarec.disabled : d->pixmaps.dynarec.normal);
+    d->dynarec->setToolTip(is_dynarec_active() ? tr("Dynamic recompiler is active") :
+                                                 tr("Dynamic recompiler is inactive"));
+    d->dynarec->setVisible(cpu_use_dynarec);
+
+    connect(d->dynarec.get(), &ClickableLabel::clicked, this, [this](QPoint pos) {
+        if (this->dynarecMenu)
+            this->dynarecMenu->popup(pos - QPoint(0, this->dynarecMenu->sizeHint().height()));
+    });
+
+    sbar->addWidget(d->dynarec.get());
+
     d->text = std::make_unique<QLabel>();
     sbar->addWidget(d->text.get());
 
@@ -1040,7 +1094,7 @@ void
 MachineStatus::updateSoundIcon()
 {
     if (d->sound)
-        d->sound->setPixmap(sound_muted ? d->pixmaps.sound.disabled : d->pixmaps.sound.normal);
+        d->sound->setPixmap((sound_muted || fast_forward) ? d->pixmaps.sound.disabled : d->pixmaps.sound.normal);
 }
 
 void
