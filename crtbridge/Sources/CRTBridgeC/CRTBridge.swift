@@ -329,11 +329,16 @@ private func recomputeLayout(_ state: CRTBridgeState) {
     }
 
     state.scaling.applyLayoutState(chosen)
-    // Pattern Scale (RGB mask coarsening) rides the engine's `patternScale` argument here —
-    // it multiplies the layout's physical stripe pitch (CRTFilter+ApplyPreset), exactly as
-    // Phosphors does. (The CRTLayoutInputs.displayMaskScale field is orphaned in 1.4.0: the
-    // physical-density refactor stopped reading it, so setting it in makeInputs did nothing —
-    // which is why the slider was inert until this call started passing patternScale.)
+    // Pattern Scale (RGB mask coarsening) — the engine's display mask reads
+    // `parameters.phosphor.patternScale` (ScalingManager.maskGeometry via
+    // CRTFilter.maskLockUniforms), NOT the `patternScale:` argument to
+    // `filter.apply`. That argument only multiplies the layout's stripeScale/stripePitch
+    // for the shadow/slot tile path; the display mask path ignores it. So the slider was
+    // inert (and the pattern picker showed nothing, because a 1.0 patternScale is
+    // sub-Nyquist on a fine tube) until this write landed. Phosphors sets the same field
+    // directly (Renderer+Presets.swift). The CRTLayoutInputs.displayMaskScale field is
+    // orphaned in CRTEngine 1.4.0 (stored, never read) — do not set it in makeInputs.
+    state.filter.parameters.phosphor.patternScale = state.displayMaskScale
     state.filter.apply(chosen, patternScale: state.displayMaskScale)
     logLayout(state, chosen, panelScale)
 
