@@ -14,7 +14,7 @@ QT_PREFIX="$(brew --prefix qt)"
 cmake -S . -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE=cmake/llvm-macos-aarch64.cmake \
     -DCMAKE_BUILD_TYPE=Release \
-    -DQT=ON -DUSE_QT6=ON -DNEW_DYNAREC=ON \
+    -DQT=ON -DUSE_QT6=ON -DDYNAREC=ON \
     -DCMAKE_PREFIX_PATH="$QT_PREFIX" \
     -DMOLTENVK_DIR="$(brew --prefix molten-vk)" \
     -DOpenAL_ROOT="$(brew --prefix openal-soft)" \
