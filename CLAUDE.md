@@ -77,6 +77,27 @@ wiped build tree changes which dylib loads.
   `Resources/default.metallib` SwiftPM reports as unhandled. `build-metallib.sh`
   globs `Shaders/*.metal`, so the metallib it builds is complete regardless —
   do not "fix" this by trusting the engine's resource manifest instead.
+- **Stale Metal toolchain path inside `crtbridge/.build`.** Since Xcode 26 the
+  Metal compiler lives on a cryptex mount whose path carries a random suffix
+  (`/var/run/com.apple.security.cryptexd/mnt/...MetalToolchain-<ver>.XXXXXX`),
+  and SwiftPM's xcbuild intermediates record that absolute path. After a
+  reboot the suffix changes and the bridge step dies with `unable to spawn
+  process '.../Metal.xctoolchain/usr/bin/metal' (No such file or directory)`.
+  The toolchain is fine (`xcrun -sdk macosx -f metal` resolves). Fix:
+  `rm -rf crtbridge/.build` — the WHOLE directory, because `.build/release` is
+  a symlink into `.build/out` and deleting only `out` leaves ninja failing on
+  a dangling output path.
+
+## Branches: master vs `crt/v6.0`
+
+`master` tracks upstream master plus the integration. `crt/v6.0` is the same
+integration (one squashed commit) on the v6.0 stable tag, created 2026-10-18
+because upstream master crashed too often to be a usable diagnostic host. It
+carries one extra backport (`qt_platform.cpp`: `mid()` instead of `remove()`,
+needed for Qt 6.12). Both branches build with `./build-macos-metal.sh` into
+`build/macmetal`; when switching branches, move the build tree aside
+(`build/macmetal-master` holds the last master build) rather than sharing it.
+Integration changes land on master first, then get cherry-picked here.
 
 ## Git
 
