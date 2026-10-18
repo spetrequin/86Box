@@ -81,10 +81,11 @@ public:
     bool event(QEvent *event) override;
 
     enum class Renderer {
-        Software,
-        OpenGL3,
-        Vulkan,
-        None = -1
+        Software = 0,
+        OpenGL3  = 1,
+        Vulkan   = 2,
+        Metal    = 4, /* Apple only; matches RENDERER_METAL. 3 is VNC (no enum). */
+        None     = -1
     };
     void switchRenderer(Renderer renderer);
 

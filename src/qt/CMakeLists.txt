@@ -377,6 +377,94 @@ endif()
 
 if (APPLE)
     target_sources(ui PRIVATE macos_event_filter.mm)
+
+    # Native Metal CRT renderer (RENDERER_METAL). The presentation core is
+    # framework-agnostic; the Qt shell wraps it in a QWindow. Links the system
+    # Metal/QuartzCore/AppKit frameworks.
+    target_sources(ui PRIVATE
+        metal_presenter.h
+        metal_presenter.mm
+        qt_metalrenderer.hpp
+        qt_metalrenderer.mm
+    )
+    find_library(METAL_LIB Metal)
+    find_library(QUARTZCORE_LIB QuartzCore)
+    find_library(APPKIT_LIB AppKit)
+    target_link_libraries(ui PRIVATE ${METAL_LIB} ${QUARTZCORE_LIB} ${APPKIT_LIB})
+
+    # --- CRTBridge (RENDERER_METAL gets the real CRTEngine phosphor simulation) ---
+    # CRTBridge is a small Swift package IN THE 86BOX TREE (src is at crtbridge/)
+    # that wraps the *unmodified* CRTEngine behind a C ABI. CMake builds it as part
+    # of the 86Box build: `swift build` produces libCRTBridgeC.dylib + CRTEngine's
+    # resource bundle; we compile CRTEngine's shaders into that bundle (reading the
+    # engine read-only) so the bridge loads them via Bundle.module. Configure the
+    # engine location with -DCRTENGINE_DIR=/path/to/CRTEngine.
+    # Default to the sibling-checkout layout Package.swift also falls back to
+    # (…/Code/Swift/CRTEngine alongside …/Code/C/86Box), expressed relative to the
+    # 86Box tree so no developer's home path is baked in. Resolved to an absolute
+    # path here on purpose: this value is handed to build.sh, which runs with
+    # crtbridge/ as its working directory, so a relative path would resolve against
+    # a different base there and silently select the wrong engine.
+    get_filename_component(CRTENGINE_DIR_DEFAULT
+                           "${CMAKE_SOURCE_DIR}/../../Swift/CRTEngine" ABSOLUTE)
+    set(CRTENGINE_DIR "${CRTENGINE_DIR_DEFAULT}" CACHE PATH "CRTEngine Swift package root")
+    set(CRTBRIDGE_DIR "${CMAKE_SOURCE_DIR}/crtbridge")
+    if(EXISTS "${CRTBRIDGE_DIR}/Package.swift" AND EXISTS "${CRTENGINE_DIR}/Package.swift")
+        set(CRTBRIDGE_DYLIB    "${CRTBRIDGE_DIR}/.build/release/libCRTBridgeC.dylib")
+        set(CRTENGINE_BUNDLE   "${CRTBRIDGE_DIR}/.build/release/CRTEngine_CRTEngine.bundle")
+
+        # Build the bridge against WHATEVER CRTEngine is checked out at CRTENGINE_DIR
+        # — no version pin. 86Box is a diagnostic host that deliberately tracks the
+        # engine tip; if the engine is broken the build breaks LOUDLY (build.sh runs
+        # set -e), which is what we want here, not a silent runtime fallback.
+        #
+        # ONE script produces BOTH the dylib (which statically links the engine's
+        # Swift) AND the metallib (the engine's compiled shaders) from the same
+        # engine revision, so they can never desync. They used to be two steps here;
+        # a partial rebuild (swift build alone) once refreshed the dylib and left the
+        # metallib stale, and Swift vs GPU then disagreed on the CRTUniforms layout —
+        # the engine failed and 86Box dropped to its raw-feed fallback. Never build
+        # them apart: crtbridge/build.sh is the only supported way to build the bridge.
+        add_custom_target(crtbridge
+            COMMAND ${CMAKE_COMMAND} -E env CRTENGINE_DIR=${CRTENGINE_DIR}
+                    ${CRTBRIDGE_DIR}/build.sh
+            WORKING_DIRECTORY ${CRTBRIDGE_DIR}
+            BYPRODUCTS ${CRTBRIDGE_DYLIB} ${CRTENGINE_BUNDLE}/default.metallib
+            COMMENT "Building CRTBridge (dylib + CRTEngine shader metallib) against ${CRTENGINE_DIR}"
+            USES_TERMINAL)
+        add_dependencies(ui crtbridge)
+
+        target_include_directories(ui PRIVATE "${CRTBRIDGE_DIR}/Sources/CRTBridgeC/include")
+        target_link_libraries(ui PRIVATE ${CRTBRIDGE_DYLIB})
+        target_compile_definitions(ui PRIVATE USE_CRTENGINE)
+        # rpath: bundled dylib (Contents/Frameworks) in a shipped app, build-tree
+        # copy for dev. The dylib's own rpath resolves the Swift runtime in
+        # /usr/lib/swift (macOS 12+).
+        set_target_properties(86Box PROPERTIES
+            BUILD_RPATH   "${CRTBRIDGE_DIR}/.build/release;@executable_path/../Frameworks"
+            INSTALL_RPATH "@executable_path/../Frameworks")
+
+        # Bundle the dylib (Frameworks) + CRTEngine's resource bundle (Resources,
+        # where Bundle.module finds it via Bundle.main) INTO 86Box.app. Separate
+        # target ordered after 86Box (which is defined in src/, not here).
+        set(_crt_fw  "$<TARGET_BUNDLE_CONTENT_DIR:86Box>/Frameworks")
+        set(_crt_res "$<TARGET_BUNDLE_CONTENT_DIR:86Box>/Resources")
+        add_custom_target(crtbundle ALL
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_crt_fw}" "${_crt_res}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CRTBRIDGE_DYLIB}" "${_crt_fw}/"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CRTENGINE_BUNDLE}"
+                    "${_crt_res}/CRTEngine_CRTEngine.bundle"
+            COMMENT "Bundling CRTBridge dylib + CRTEngine resource bundle into 86Box.app"
+            VERBATIM)
+        # Depend on crtbridge as well as 86Box: the copy must never run before the
+        # dylib+metallib are (re)built, so the .app can't be assembled with a stale
+        # pair. (86Box already runs after crtbridge via ui, but state it directly.)
+        add_dependencies(crtbundle 86Box crtbridge)
+        message(STATUS "CRTBridge enabled (bridge=${CRTBRIDGE_DIR}, engine=${CRTENGINE_DIR})")
+    else()
+        message(STATUS "CRTBridge/CRTEngine not found; Metal renderer builds as stub (no CRT sim)")
+    endif()
+
     if(MOLTENVK)
         find_path(MOLTENVK_INCLUDE "vulkan/vulkan.h" PATHS "/opt/homebrew/opt/molten-vk/libexec/include" "/usr/local/opt/molten-vk/libexec/include" ${MOLTENVK_INCLUDE_DIR})
         if (NOT MOLTENVK_INCLUDE)

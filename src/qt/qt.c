@@ -45,6 +45,8 @@ plat_vidapi(const char *api)
         return RENDERER_OPENGL3;
     else if (!strcasecmp(api, RENDERER_NAME_QT_VULKAN))
         return RENDERER_VULKAN;
+    else if (!strcasecmp(api, RENDERER_NAME_QT_METAL))
+        return RENDERER_METAL;
     else if (!strcasecmp(api, RENDERER_NAME_VNC))
         return RENDERER_VNC;
 
@@ -65,6 +67,9 @@ plat_vidapi_name(int api)
             break;
         case RENDERER_VULKAN:
             name = RENDERER_NAME_QT_VULKAN;
+            break;
+        case RENDERER_METAL:
+            name = RENDERER_NAME_QT_METAL;
             break;
         case RENDERER_VNC:
             name = RENDERER_NAME_VNC;
