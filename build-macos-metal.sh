@@ -11,6 +11,13 @@ cd "$(dirname "$0")"
 BUILD_DIR=build/macmetal
 QT_PREFIX="$(brew --prefix qt)"
 
+# fluid-synth's fluidsynth.pc lists readline under Requires.private (since 2.6.2), and
+# Homebrew's readline is keg-only, so its readline.pc is not on pkg-config's default
+# path. Without this pkg-config cannot resolve fluidsynth, CMake's FindPkgConfig still
+# reports it found but with EMPTY link flags, and the build dies at the final link with
+# every _fluid_* symbol undefined — far from the cause.
+export PKG_CONFIG_PATH="$(brew --prefix readline)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+
 cmake -S . -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE=cmake/llvm-macos-aarch64.cmake \
     -DCMAKE_BUILD_TYPE=Release \

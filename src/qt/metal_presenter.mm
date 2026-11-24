@@ -11,9 +11,11 @@
 
 #include <cstdio>
 #include <cmath>
+#include <string>
 
 #ifdef USE_CRTENGINE
 #    include "crt_bridge.h"
+static NSString *savedPresetName();   // the user's last preset choice; defined with the options code
 #endif
 
 /* 86Box hands every renderer a fixed-stride buffer; the source texture matches. */
@@ -94,6 +96,8 @@ struct MetalPresenter::Impl {
     int            ch         = 0;
     float          signalHz   = 0.0f;    // emulated card's true refresh (0 = unreported)
     float          sentHz     = -1.0f;   // last refresh pushed to the bridge
+    bool           presentFailing = false;   // crt_bridge_present is failing: raw feed on screen
+    int            edrState   = -1;      // layer EDR setup last applied: -1 none, 0 SDR, 1 EDR
     id<MTLTexture> content    = nil;     // the (upscaled) frame fed to the engine
     CFAbsoluteTime startTime  = 0;       // phosphor/beam clock origin
 #endif
@@ -419,8 +423,20 @@ presentCRT(MetalPresenter::Impl *impl, int srcX, int srcY, int srcW, int srcH)
     if (!crt_bridge_present(impl->crt, (__bridge void *) impl->content, t,
                             (__bridge void *) drawable.texture, (__bridge void *) cb,
                             sdrEncoded)) {
+        // The caller now draws the RAW feed instead. That fallback is silent on screen —
+        // a picture appears, it is simply not the tube's, and every CRT control goes
+        // dead — so it must not be silent here too. Say so once per run of failures.
+        if (!impl->presentFailing) {
+            impl->presentFailing = true;
+            logSignal("CRT PRESENT FAILED - showing the RAW feed, CRT controls are inert",
+                      srcW, srcH, impl->signalHz);
+        }
         [cb commit];
         return false;
+    }
+    if (impl->presentFailing) {
+        impl->presentFailing = false;
+        logSignal("CRT present recovered", srcW, srcH, impl->signalHz);
     }
     [cb presentDrawable:drawable];
     [cb commit];
@@ -494,40 +510,37 @@ MetalPresenter::enableCRT(const char *presetName, int contentW, int contentH)
                         "(CRTEngine resource bundle / metallib missing?)\n");
         return false;
     }
-    if (!crt_bridge_apply_preset(impl->crt, presetName, contentW, contentH)) {
+    // The dial list is declared twice — CRTDial here, `Dial` in CRTBridge.swift — and
+    // nothing in the toolchain ties a C enum to a Swift one. If they drift, every dial
+    // after the drift point drives its neighbour, so say so loudly rather than let a
+    // slider quietly move the wrong thing.
+    if (crt_bridge_dial_count() != CRT_DIAL_COUNT)
+        fprintf(stderr, "[MetalPresenter] WARNING: crt_bridge.h declares %d dials, the bridge "
+                        "implements %d — rebuild with crtbridge/build.sh\n",
+                (int) CRT_DIAL_COUNT, crt_bridge_dial_count());
+
+    // The tube: the one the user last chose, else the caller's default.
+    NSString   *saved  = savedPresetName();
+    const char *chosen = saved ? saved.UTF8String : presetName;
+    if (!crt_bridge_set_preset(impl->crt, chosen)
+        && (chosen == presetName || !crt_bridge_set_preset(impl->crt, presetName))) {
         fprintf(stderr, "[MetalPresenter] enableCRT: preset '%s' failed\n", presetName);
         crt_bridge_destroy(impl->crt);
         impl->crt = nullptr;
         return false;
     }
-    crt_bridge_set_drawable_size(impl->crt, dw, dh);
     impl->cw        = contentW;
     impl->ch        = contentH;
     impl->content   = nil;          // built lazily in presentCRT at the real size
     impl->startTime = CFAbsoluteTimeGetCurrent();
     impl->crtOn     = true;
-    loadSettings();   // re-apply persisted user adjustments over the preset
+    loadSettings();   // the user's dial positions, over the preset's
     fprintf(stderr, "[MetalPresenter] CRT enabled — preset '%s', drawable %dx%d\n",
-            presetName, dw, dh);
+            crt_bridge_preset_name(crt_bridge_current_preset(impl->crt)), dw, dh);
     return true;
 #else
     (void) presetName; (void) contentW; (void) contentH;
     return false;
-#endif
-}
-
-void
-MetalPresenter::setContentSize(int contentW, int contentH)
-{
-#ifdef USE_CRTENGINE
-    if (impl->crt && (contentW != impl->cw || contentH != impl->ch)) {
-        impl->cw = contentW;
-        impl->ch = contentH;
-        crt_bridge_set_content_size(impl->crt, contentW, contentH);
-        impl->content = nil;        // force rebuild at the new size
-    }
-#else
-    (void) contentW; (void) contentH;
 #endif
 }
 
@@ -554,55 +567,253 @@ MetalPresenter::setDisplayRefresh(float hz)
 #endif
 }
 
+/* ---- CRT options: apply to the engine AND persist (NSUserDefaults) ----------------
+
+   One table, indexed by CRTDial, gives each dial its defaults key. A dial is persisted
+   only once the user has moved it; an absent key means "the preset's position", so a
+   preset keeps its own look for everything the user has left alone, and Reset is just
+   removing the key.
+
+   A PERSISTED KEY OUTLIVES THE CONTROL THAT WROTE IT. Two sliders (crt.scansmooth,
+   crt.patsmooth) were once removed from the dialog while their loader stayed: the last
+   values they had held were then re-applied on every launch with no UI left to undo
+   them, and it cost a measured 8x scanline beat. Loading is now driven by this table and
+   nothing else, so a dial that leaves the table stops being loaded in the same edit —
+   but a key retired here is still on disk, and must not be given a new meaning. */
 #ifdef USE_CRTENGINE
-static inline void crtPersist(const char *key, float v) {
-    [[NSUserDefaults standardUserDefaults] setFloat:v
-        forKey:[NSString stringWithUTF8String:key]];
-}
-// CRT preset names, index-aligned with the options dialog's preset combo. Order
-// must match. Index 5 ("VGA monitor") is the default 86Box enables.
-static const char *kCrtPresetNames[] = {
-    "Green CRT monitor", "Amber CRT monitor", "White CRT monitor",
-    "NTSC black and white", "NTSC color", "VGA monitor",
+static const char *const kDialKeys[CRT_DIAL_COUNT] = {
+    /* CRT_DIAL_BRIGHTNESS      */ "crt.brightness",
+    /* CRT_DIAL_CONTRAST        */ "crt.contrast",
+    /* CRT_DIAL_SATURATION      */ "crt.saturation",
+    /* CRT_DIAL_PEAK_HIGHLIGHTS */ "crt.peaks",
+    /* CRT_DIAL_PATTERN_SCALE   */ "crt.maskscale",   // same unit it always wrote: px per triad
+    /* CRT_DIAL_PATTERN_FOCUS   */ "crt.patternfocus",
+    /* CRT_DIAL_CURVATURE       */ "crt.curvature",
+    /* CRT_DIAL_HALATION        */ "crt.halation",
+    /* CRT_DIAL_SCATTER         */ "crt.scatter",
+    /* CRT_DIAL_OVERSCAN        */ "crt.overscan",
+    /* CRT_DIAL_VIGNETTE        */ "crt.vignette",
+    /* CRT_DIAL_SHARPNESS       */ "crt.sharpness",
+    /* CRT_DIAL_H_BANDWIDTH     */ "crt.hbandwidth",
+    /* CRT_DIAL_H_FOCUS         */ "crt.hfocus",
+    /* CRT_DIAL_SHUTTER         */ "crt.shutter",
+    /* CRT_DIAL_EDGE_FOCUS      */ "crt.edge",
+    /* CRT_DIAL_BLOOM           */ "crt.bloom",
+    /* CRT_DIAL_CONVERGENCE     */ "crt.convergence",
+    /* CRT_DIAL_H_JITTER        */ "crt.hjitter",
+    /* CRT_DIAL_V_JITTER        */ "crt.vjitter",
+    /* CRT_DIAL_SHOT_NOISE      */ "crt.shotnoise",
+    /* CRT_DIAL_SIGNAL_NOISE    */ "crt.signalnoise",
 };
-// Apply to the engine (if live) AND persist under `key` for next launch.
-#  define CRT_SET(call, key, v) do { if (impl->crt) call; crtPersist(key, (float)(v)); } while (0)
-#else
-#  define CRT_SET(call, key, v) do { (void)(v); } while (0)
+static NSString *const kPatternKey    = @"crt.pattern";
+static NSString *const kPresetNameKey = @"crt.presetName";
+static NSString *const kLegacyPresetIndexKey = @"crt.preset";
+
+static inline NSString *dialKey(int dial) { return [NSString stringWithUTF8String:kDialKeys[dial]]; }
+static inline bool      dialValid(int dial) { return dial >= 0 && dial < CRT_DIAL_COUNT; }
+
+/* The preset the user last chose, by NAME. The choice used to be stored as an index
+   into a table of names kept in this file; the engine then renamed one ("White CRT
+   monitor" -> "B&W CRT monitor") and that entry silently stopped resolving. A name
+   survives the engine reordering or adding presets; an old index is translated once
+   through the table as it stood when the index was written. */
+static NSString *
+savedPresetName()
+{
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (NSString *name = [d stringForKey:kPresetNameKey])
+        return name;
+    if ([d objectForKey:kLegacyPresetIndexKey] != nil) {
+        static NSString *const legacy[] = {
+            @"Green CRT monitor", @"Amber CRT monitor", @"B&W CRT monitor",
+            @"NTSC black and white", @"NTSC color", @"VGA monitor",
+        };
+        long i = lroundf([d floatForKey:kLegacyPresetIndexKey]);
+        if (i >= 0 && i < 6)
+            return legacy[i];
+    }
+    return nil;
+}
 #endif
 
-void MetalPresenter::setBrightness(float v)     { CRT_SET(crt_bridge_set_brightness(impl->crt, v),       "crt.brightness", v); }
-void MetalPresenter::setContrast(float v)       { CRT_SET(crt_bridge_set_contrast(impl->crt, v),         "crt.contrast", v); }
-void MetalPresenter::setPhosphorPattern(int p)  { CRT_SET(crt_bridge_set_phosphor_pattern(impl->crt, p), "crt.pattern", p); }
-void MetalPresenter::setSharpness(float v)      { CRT_SET(crt_bridge_set_sharpness(impl->crt, v),        "crt.sharpness", v); }
-void MetalPresenter::setEdgeFocus(float v)      { CRT_SET(crt_bridge_set_edge_focus(impl->crt, v),       "crt.edge", v); }
-void MetalPresenter::setBloom(float v)          { CRT_SET(crt_bridge_set_bloom(impl->crt, v),            "crt.bloom", v); }
-void MetalPresenter::setConvergence(float v)    { CRT_SET(crt_bridge_set_convergence(impl->crt, v),      "crt.convergence", v); }
-void MetalPresenter::setHJitter(float v)        { CRT_SET(crt_bridge_set_h_jitter(impl->crt, v),         "crt.hjitter", v); }
-void MetalPresenter::setVJitter(float v)        { CRT_SET(crt_bridge_set_v_jitter(impl->crt, v),         "crt.vjitter", v); }
-void MetalPresenter::setShotNoise(float v)      { CRT_SET(crt_bridge_set_shot_noise(impl->crt, v),       "crt.shotnoise", v); }
-void MetalPresenter::setSignalNoise(float v)    { CRT_SET(crt_bridge_set_signal_noise(impl->crt, v),     "crt.signalnoise", v); }
-void MetalPresenter::setHBandwidth(float v)     { CRT_SET(crt_bridge_set_h_bandwidth(impl->crt, v),      "crt.hbandwidth", v); }
-void MetalPresenter::setHFocus(float v)         { CRT_SET(crt_bridge_set_h_focus(impl->crt, v),          "crt.hfocus", v); }
-void MetalPresenter::setBeamSegment(float v)    { CRT_SET(crt_bridge_set_beam_segment(impl->crt, v),     "crt.beamseg", v); }
-void MetalPresenter::setShutter(float v)        { CRT_SET(crt_bridge_set_shutter(impl->crt, v),          "crt.shutter", v); }
-void MetalPresenter::setMaskScale(float v)      { CRT_SET(crt_bridge_set_mask_scale(impl->crt, v),       "crt.maskscale", v); }
-void MetalPresenter::setPeakHighlights(float v) { CRT_SET(crt_bridge_set_peak_highlights(impl->crt, v),  "crt.peaks", v); }
-void MetalPresenter::setPreset(int idx)         { if (idx < 0 || idx >= 6) return; CRT_SET(crt_bridge_set_preset(impl->crt, kCrtPresetNames[idx]), "crt.preset", idx); }
-
-#undef CRT_SET
-
-float
-MetalPresenter::persistedValue(const char *key, float fallback) const
+int
+MetalPresenter::presetCount() const
 {
 #ifdef USE_CRTENGINE
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    NSString *k = [NSString stringWithUTF8String:key];
-    if ([d objectForKey:k] != nil)
-        return [d floatForKey:k];
+    return crt_bridge_preset_count();
+#else
+    return 0;
 #endif
-    (void) key;
-    return fallback;
+}
+
+const char *
+MetalPresenter::presetName(int index) const
+{
+#ifdef USE_CRTENGINE
+    return crt_bridge_preset_name(index);
+#else
+    (void) index;
+    return nullptr;
+#endif
+}
+
+int
+MetalPresenter::currentPreset() const
+{
+#ifdef USE_CRTENGINE
+    if (impl->crt)
+        return crt_bridge_current_preset(impl->crt);
+#endif
+    return -1;
+}
+
+void
+MetalPresenter::setPreset(int index)
+{
+#ifdef USE_CRTENGINE
+    const char *name = crt_bridge_preset_name(index);
+    if (impl->crt == nullptr || name == nullptr || !crt_bridge_set_preset(impl->crt, name))
+        return;
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [d setObject:[NSString stringWithUTF8String:name] forKey:kPresetNameKey];
+    [d removeObjectForKey:kLegacyPresetIndexKey];
+#else
+    (void) index;
+#endif
+}
+
+bool
+MetalPresenter::isColor() const
+{
+#ifdef USE_CRTENGINE
+    if (impl->crt)
+        return crt_bridge_is_color(impl->crt);
+#endif
+    return false;
+}
+
+int
+MetalPresenter::phosphorPattern() const
+{
+#ifdef USE_CRTENGINE
+    if (impl->crt)
+        return crt_bridge_get_phosphor_pattern(impl->crt);
+#endif
+    return 0;
+}
+
+void
+MetalPresenter::setPhosphorPattern(int pattern)
+{
+#ifdef USE_CRTENGINE
+    if (impl->crt == nullptr || pattern < 0 || pattern > 3)
+        return;
+    crt_bridge_set_phosphor_pattern(impl->crt, pattern);
+    [[NSUserDefaults standardUserDefaults] setInteger:pattern forKey:kPatternKey];
+#else
+    (void) pattern;
+#endif
+}
+
+bool
+MetalPresenter::dialRange(int dial, float *lo, float *hi) const
+{
+#ifdef USE_CRTENGINE
+    return crt_bridge_dial_range(dial, lo, hi);
+#else
+    (void) dial; (void) lo; (void) hi;
+    return false;
+#endif
+}
+
+float
+MetalPresenter::dial(int dial) const
+{
+#ifdef USE_CRTENGINE
+    if (impl->crt)
+        return crt_bridge_get_dial(impl->crt, dial);
+#endif
+    (void) dial;
+    return 0.0f;
+}
+
+float
+MetalPresenter::dialDefault(int dial) const
+{
+#ifdef USE_CRTENGINE
+    if (impl->crt)
+        return crt_bridge_dial_default(impl->crt, dial);
+#endif
+    (void) dial;
+    return 0.0f;
+}
+
+bool
+MetalPresenter::dialIsSet(int dial) const
+{
+#ifdef USE_CRTENGINE
+    if (impl->crt)
+        return crt_bridge_dial_is_set(impl->crt, dial);
+#endif
+    (void) dial;
+    return false;
+}
+
+void
+MetalPresenter::setDial(int dial, float v)
+{
+#ifdef USE_CRTENGINE
+    if (impl->crt == nullptr || !dialValid(dial))
+        return;
+    crt_bridge_set_dial(impl->crt, dial, v);
+    // Persist what the bridge kept (it clamps to the dial's range), not what was asked.
+    [[NSUserDefaults standardUserDefaults] setFloat:crt_bridge_get_dial(impl->crt, dial)
+                                             forKey:dialKey(dial)];
+#else
+    (void) dial; (void) v;
+#endif
+}
+
+void
+MetalPresenter::resetDial(int dial)
+{
+#ifdef USE_CRTENGINE
+    if (impl->crt == nullptr || !dialValid(dial))
+        return;
+    crt_bridge_reset_dial(impl->crt, dial);
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:dialKey(dial)];
+#else
+    (void) dial;
+#endif
+}
+
+void
+MetalPresenter::resetAll()
+{
+#ifdef USE_CRTENGINE
+    if (impl->crt == nullptr)
+        return;
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    for (int dial = 0; dial < CRT_DIAL_COUNT; dial++) {
+        crt_bridge_reset_dial(impl->crt, dial);
+        [d removeObjectForKey:dialKey(dial)];
+    }
+    crt_bridge_set_phosphor_pattern(impl->crt, -1);   // the preset's own
+    [d removeObjectForKey:kPatternKey];
+#endif
+}
+
+std::string
+MetalPresenter::status() const
+{
+#ifdef USE_CRTENGINE
+    if (impl->crt) {
+        char buf[512];
+        crt_bridge_describe(impl->crt, buf, (int) sizeof(buf));
+        return std::string(buf);
+    }
+#endif
+    return std::string();
 }
 
 void
@@ -612,53 +823,17 @@ MetalPresenter::loadSettings()
     if (impl->crt == nullptr)
         return;
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    auto has = [d](const char *k) {
-        return [d objectForKey:[NSString stringWithUTF8String:k]] != nil;
-    };
-    auto fv = [d](const char *k) {
-        return [d floatForKey:[NSString stringWithUTF8String:k]];
-    };
-    // Only override settings the user has actually changed; untouched ones keep
-    // the preset's value. Apply via the bridge directly (no re-persist).
-    // Preset first (it re-applies preset defaults), then the picture/beam overrides.
-    if (has("crt.preset")) {
-        int pi = (int) lroundf(fv("crt.preset"));
-        if (pi >= 0 && pi < 6) crt_bridge_set_preset(impl->crt, kCrtPresetNames[pi]);
+    // Only what the user actually moved; everything else stays on the preset.
+    if ([d objectForKey:kPatternKey] != nil) {
+        long p = lroundf([d floatForKey:kPatternKey]);
+        if (p >= 0 && p <= 3)
+            crt_bridge_set_phosphor_pattern(impl->crt, (int) p);
     }
-    if (has("crt.brightness"))   crt_bridge_set_brightness(impl->crt, fv("crt.brightness"));
-    if (has("crt.contrast"))     crt_bridge_set_contrast(impl->crt, fv("crt.contrast"));
-    if (has("crt.pattern"))      crt_bridge_set_phosphor_pattern(impl->crt, (int) lroundf(fv("crt.pattern")));
-    if (has("crt.sharpness"))    crt_bridge_set_sharpness(impl->crt, fv("crt.sharpness"));
-    if (has("crt.edge"))         crt_bridge_set_edge_focus(impl->crt, fv("crt.edge"));
-    if (has("crt.bloom"))        crt_bridge_set_bloom(impl->crt, fv("crt.bloom"));
-    if (has("crt.convergence"))  crt_bridge_set_convergence(impl->crt, fv("crt.convergence"));
-    if (has("crt.hjitter"))      crt_bridge_set_h_jitter(impl->crt, fv("crt.hjitter"));
-    if (has("crt.vjitter"))      crt_bridge_set_v_jitter(impl->crt, fv("crt.vjitter"));
-    if (has("crt.shotnoise"))    crt_bridge_set_shot_noise(impl->crt, fv("crt.shotnoise"));
-    if (has("crt.signalnoise"))  crt_bridge_set_signal_noise(impl->crt, fv("crt.signalnoise"));
-    if (has("crt.hbandwidth"))   crt_bridge_set_h_bandwidth(impl->crt, fv("crt.hbandwidth"));
-    if (has("crt.hfocus"))       crt_bridge_set_h_focus(impl->crt, fv("crt.hfocus"));
-    if (has("crt.shutter"))      crt_bridge_set_shutter(impl->crt, fv("crt.shutter"));
-    // crt.scansmooth and crt.patsmooth are NOT read any more, and must not be re-added.
-    //
-    // Both sliders were removed from qt_metalrenderer.mm, but this loader kept applying
-    // whatever they had last persisted — values with no UI left to undo them, re-applied on
-    // every launch. The pair had drifted to 0.078 and 0, which between them relaxed the
-    // engine's display-domain beam-sigma floor (0.9 -> 0.60 display px), all but disabled
-    // scanlineBandLimit, and dropped the mask band-limit to raw. Measured cost at 1024x768:
-    // the scanline comb folded to a 15 px beat at 8x the amplitude of the same picture in
-    // Phosphors, which has no such controls and pins both at their safe defaults.
-    //
-    // Both now sit at the engine's defaults (scanlineSmoothing 1.0 in makeInputs,
-    // maskSmoothing 1.0 untouched). The stale keys are deliberately ignored, not migrated:
-    // there is no value of either worth restoring. THE LESSON: a persisted key outlives the
-    // control that wrote it, so removing a slider means removing its loader in the same
-    // commit — otherwise the last value a user happened to leave becomes a permanent,
-    // invisible override.
-    if (has("crt.maskscale"))    crt_bridge_set_mask_scale(impl->crt, fv("crt.maskscale"));
-    // Peak highlights (the old crt.hdrenabled/hdrboost keys are retired — EDR is no
-    // longer a gain, so their values have no meaning under the new curve).
-    if (has("crt.peaks"))        crt_bridge_set_peak_highlights(impl->crt, fv("crt.peaks"));
+    for (int dial = 0; dial < CRT_DIAL_COUNT; dial++) {
+        NSString *key = dialKey(dial);
+        if ([d objectForKey:key] != nil)
+            crt_bridge_set_dial(impl->crt, dial, [d floatForKey:key]);
+    }
 #endif
 }
 
@@ -674,9 +849,18 @@ MetalPresenter::updateDisplay(void *nsScreen)
     // engine's >1.0 phosphor/mask brightness has somewhere real to go instead of being
     // soft-clipped into the SDR range. (Was 1.05; a panel reporting even a little headroom
     // is better served by the float/linear path than by encoding down to 8 bits.)
-    bool           edr     = crt_bridge_edr_headroom(impl->crt) > 1.0f;
-    MTLPixelFormat desired = edr ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
+    bool edr = crt_bridge_edr_headroom(impl->crt) > 1.0f;
 
+    // Touch the layer only when the answer CHANGES. This is called for every display
+    // report, and macOS posts a screen-parameters notification for every twitch of EDR
+    // headroom — about a dozen a second while EDR settles. Re-writing the layer's format,
+    // EDR flag and colour space on each one was, at best, churn (and it leaked a
+    // CGColorSpace per call: Create without Release).
+    if (impl->edrState == (edr ? 1 : 0))
+        return;
+    impl->edrState = edr ? 1 : 0;
+
+    MTLPixelFormat desired = edr ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
     if (desired != impl->layerFormat) {
         impl->layerFormat = desired;
         if (!buildPipeline(impl))      // rebuild for the new attachment format
@@ -684,8 +868,10 @@ MetalPresenter::updateDisplay(void *nsScreen)
         impl->layer.pixelFormat = desired;
     }
     impl->layer.wantsExtendedDynamicRangeContent = edr;
-    impl->layer.colorspace = CGColorSpaceCreateWithName(
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(
         edr ? kCGColorSpaceExtendedLinearDisplayP3 : kCGColorSpaceDisplayP3);
+    impl->layer.colorspace = cs;       // the layer retains it
+    CGColorSpaceRelease(cs);
     fprintf(stderr, "[MetalPresenter] display updated — EDR %s (headroom %.2f)\n",
             edr ? "ON" : "off", crt_bridge_edr_headroom(impl->crt));
 #else
