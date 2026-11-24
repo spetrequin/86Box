@@ -1,11 +1,29 @@
 //
 //  CRTBridge.swift — flat C ABI over CRTEngine.
 //
-//  Exposes the minimum surface an emulator frontend (e.g. an 86Box Qt renderer)
-//  needs: create a filter, pick a preset, hand in a Metal texture per frame, get
-//  a simulated texture back. Every entry point is an @_cdecl symbol matching
+//  Exposes the surface an emulator frontend (the 86Box Qt Metal renderer) needs:
+//  create the tube, pick a preset, report the signal and the display, turn the
+//  dials, and present a frame. Every entry point is an @_cdecl symbol matching
 //  crt_bridge.h, so a clang/Obj-C++ translation unit can drive the
 //  (compiled-Swift) engine with no Swift toolchain on the calling side.
+//
+//  THE SHAPE OF THIS FILE (ported 2026-11-24 to the engine's one-call
+//  configuration, CRTEngine docs/HostContract.md §3 and §6):
+//
+//    • ONE DECLARATION. Everything structural — preset, signal, pattern,
+//      Sharpness, drawable — is gathered into a `CRTConfigurationRequest` in
+//      `makeRequest` and handed to `CRTFilter.configure(_:)` from `reconfigure`.
+//      The engine computes the layout, sizes the buffers and the VGA encoder
+//      from it and restarts the beam cadence. Nothing here computes a layout,
+//      keeps a ScalingManager or sizes an encoder any more: the bridge used to
+//      do all three on the engine's legacy two-step path, with the line count
+//      written twice.
+//
+//    • ONE DIAL TABLE. Every continuous user control is a `Dial`: the range
+//      (the engine's own wherever it publishes one), where the preset starts
+//      it, and the parameter it writes. The host reads all three through the
+//      ABI, so its sliders cannot disagree with the engine about a range or a
+//      default, and adding a dial is one case here plus one row in the dialog.
 //
 //  Metal objects cross as raw pointers. An id<MTLDevice> handed over from
 //  Obj-C as (__bridge void *) is an unretained pointer to a live Obj-C object;
@@ -29,95 +47,241 @@ private func object<T>(_ ptr: UnsafeMutableRawPointer, as _: T.Type) -> T? {
     return Unmanaged<AnyObject>.fromOpaque(ptr).takeUnretainedValue() as? T
 }
 
-// MARK: - Bridge state
+@inline(__always)
+private func bridgeState(_ ref: UnsafeMutableRawPointer) -> CRTBridgeState {
+    Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
+}
 
-/// One live engine: the filter plus the scaling/layout it needs to size itself.
-private final class CRTBridgeState {
-    let device: MTLDevice
-    let filter: CRTFilter
-    var scaling: ScalingManager
-    var preset: CRTPreset?
-    var phosphor: PhosphorPreset?
-    var contentSize: SIMD2<Int> = SIMD2(640, 480)
-    /// Vertical refresh of the SIGNAL the emulated card is sending, as reported by
-    /// its CRTC (crt_bridge_set_signal). This is what the tube locks to and times its
-    /// beam against — NOT the host display's refresh (that is `filter.displayRefreshRate`,
-    /// set by crt_bridge_set_display_refresh). Keep the two straight.
-    /// 0 = the card did not report it; fall back to the standards table.
-    var signalRefreshHz: Float = 0
-    var drawableSize: CGSize = CGSize(width: 0, height: 0)
-    /// USER override of the phosphor-buffer render width (px). 0 = let CRTEngine decide,
-    /// which is the normal case: render resolution is engine policy for a display-only
-    /// host (D2 — the engine sizes it from its own viewport). Non-zero only if the host
-    /// explicitly pins it via crt_bridge_set_render_resolution.
-    var renderWidthOverride: Int = 0
-    /// `.displayOnly` RGB mask scale (Pattern Scale) — a multiplier of the tube's PHYSICAL
-    /// phosphor pitch. 1.0 (default) = the real pitch; higher coarsens the grille so it reads
-    /// at smaller window sizes. CRTEngine 1.4.0 supports 1–10×. Set via crt_bridge_set_mask_scale;
-    /// the CRT_MASK_SCALE env var seeds it. See CRTEngine docs/RenderIntent-DisplayVsRecording.md.
-    var displayMaskScale: Float =
-        Float(ProcessInfo.processInfo.environment["CRT_MASK_SCALE"] ?? "") ?? 1.0
-    /// Host override of the preset's phosphor pattern (nil = use preset).
-    var patternOverride: Int? = nil
-    /// Host sharpness dial [0=soft … 1=sharp] (nil = use preset's beam falloff).
-    /// Converted to beamFalloff per-layout so it's perceptually linear and
-    /// resolution-aware (Phosphors does the same projection).
-    var sharpnessOverride: Float? = nil
-    /// User convergence in [-10, 10] (bipolar; sign = fringing direction). Stored
-    /// raw and scaled by pixelScale at apply time, so it tracks render resolution.
-    var convergenceRaw: Float = 0
-    // Directly-set picture/beam/condition overrides. nil = keep the preset's
-    // value. Re-applied after every applyPreset (which a mode change re-runs),
-    // so user settings survive 86Box resolution switches.
-    var brightnessOverride:   Float? = nil
-    var contrastOverride:     Float? = nil
-    var edgeFocusOverride:    Float? = nil
-    var bloomOverride:        Float? = nil
-    var hJitterOverride:      Float? = nil
-    var vJitterOverride:      Float? = nil
-    var shotNoiseOverride:    Float? = nil
-    var signalNoiseOverride:  Float? = nil
-    var hBandwidthOverride:   Float? = nil   // raised-cosine rolloff β (video bandwidth)
-    var hFocusOverride:       Float? = nil   // optical horizontal focus σ (source px)
-    var beamSegmentOverride:  Float? = nil   // beam temporal resolution (1 = legacy whole-line, <1 = segmented dot)
-    var shutterOverride:      Float? = nil   // observer integration (1 = fused eye, <1 = camera shutter)
-    let displayEnv = DisplayEnvironment()
+@inline(__always)
+private func clamp(_ v: Float, _ r: ClosedRange<Float>) -> Float {
+    max(r.lowerBound, min(r.upperBound, v))
+}
 
-    /// The engine's display tail (band-limited scale + the drawable's transfer function).
-    /// Rebuilt when the drawable's pixel format or transfer changes — e.g. the window moves
-    /// to an EDR display and the host swaps the layer from bgra8Unorm to rgba16Float.
-    var compositor: DisplayCompositor? = nil
-    /// Viewport-sized intermediate that the 1.4.0 display shader renders into — the RGB mask
-    /// is evaluated at OUTPUT (on-screen) resolution here, so it stays sharp at any window
-    /// size instead of being baked into the phosphor buffer and upscaled. The compositor
-    /// then places it (aspect) and applies the drawable's transfer. Resized with the viewport.
-    var displaySurface: MTLTexture? = nil
+// MARK: - Presets (the engine's list, loaded once)
 
-    init(device: MTLDevice, filter: CRTFilter, scaling: ScalingManager) {
-        self.device = device
-        self.filter = filter
-        self.scaling = scaling
+/// The engine's bundled presets. The host enumerates THIS rather than keeping its
+/// own table of names: its table went stale the day the engine renamed
+/// "White CRT monitor" to "B&W CRT monitor", and the dialog kept offering a preset
+/// that no longer existed.
+private enum PresetLibrary {
+    static let loaded: (phosphors: [PhosphorPreset], crts: [CRTPreset])? = PresetLoader.loadPresets()
+    static var crts: [CRTPreset] { loaded?.crts ?? [] }
+    /// C strings for crt_bridge_preset_name — allocated once, never freed, so the
+    /// pointers handed to the host stay valid for the life of the process.
+    static let cNames: [UnsafeMutablePointer<CChar>?] = crts.map { strdup($0.name) }
+
+    static func find(_ name: String) -> (preset: CRTPreset, phosphor: PhosphorPreset)? {
+        guard let lib = loaded,
+              let preset = lib.crts.first(where: { $0.name == name }),
+              lib.phosphors.indices.contains(preset.phosphorIndex) else { return nil }
+        return (preset, lib.phosphors[preset.phosphorIndex])
     }
 }
 
-/// Scanline count of the signal on the wire. A multisync monitor paints exactly the
-/// raster it is sent, so this is simply the content height.
-///
-/// It does NOT scan-double. Scan-doubling is the VIDEO CARD's job: a VGA card running
-/// a 200-line mode re-times it to 400 lines (CRTC `crtc[9]` bit 7) before it reaches
-/// the cable, so the monitor never sees a 200-line VGA signal. 86Box models this
-/// (`svga->linedbl`), so the raster arriving here is already doubled. Doubling again
-/// here would be a second, bogus doubling by a device that has no business doing it.
-/// A genuinely 200-line signal (a real CGA card) is painted as 200 lines — which is
-/// what a CGA monitor did.
-///
-/// A fixed-frequency tube has one raster it can paint, so it uses the preset's count.
-private func signalScanlines(_ preset: CRTPreset, _ contentH: Int) -> Int {
-    guard preset.multiSync else { return preset.scanlineCount }
-    return max(1, min(contentH, 2048))   // sanity bounds only — no reshaping
+// MARK: - Dials
+
+/// The continuous user controls. Raw values are the C ABI's `CRTDial` — the two
+/// lists MUST stay in step (the host checks crt_bridge_dial_count() against
+/// CRT_DIAL_COUNT at bring-up and says so on stderr if they have drifted).
+private enum Dial: Int32, CaseIterable {
+    case brightness = 0, contrast, saturation, peakHighlights
+    case patternScale, patternFocus
+    case curvature, halation, scatter, overscan, vignette
+    case sharpness, hBandwidth, hFocus, shutter, edgeFocus, bloom, convergence
+    case hJitter, vJitter, shotNoise, signalNoise
+
+    /// The dial's travel. Where the engine publishes a range it is read from the
+    /// engine (HostContract: "the host's slider reads it") — pattern scale, glass
+    /// curvature and scatter, overscan. The rest are the ranges the engine documents
+    /// beside each parameter in CRTFilter.swift.
+    var range: ClosedRange<Float> {
+        switch self {
+        case .brightness:     return -0.4...0.5
+        case .contrast:       return 0.1...3.0
+        case .saturation:     return 0.0...2.0
+        // How far the peaks MAY rise; the engine caps it by the panel's live headroom.
+        case .peakHighlights: return 1.0...8.0
+        case .patternScale:   return ScalingManager.patternScaleRange
+        case .patternFocus:   return 0.0...1.0
+        case .curvature:      return DisplayParameters.curvatureRange
+        case .halation:       return 0.0...1.0
+        case .scatter:        return DisplayParameters.scatterRange
+        case .overscan:       return BroadcastParameters.overscanRange
+        case .vignette:       return 0.0...0.5
+        case .sharpness:      return 0.0...1.0
+        case .hBandwidth:     return 0.0...1.0
+        case .hFocus:         return -3.0...3.0
+        case .shutter:        return 0.0...1.0
+        case .edgeFocus:      return 0.0...1.0
+        case .bloom:          return 0.0...0.5
+        case .convergence:    return -10.0...10.0
+        case .hJitter:        return 0.0...3.0
+        case .vJitter:        return 0.0...2.0
+        case .shotNoise:      return 0.0...0.05
+        case .signalNoise:    return 0.0...0.15
+        }
+    }
+
+    /// Where the dial sits when the user has not touched it: the preset's own value
+    /// for what a preset carries, the engine's default for everything else.
+    /// `d` is the engine's parameters as a fresh filter holds them, captured before
+    /// anything was configured (`CRTBridgeState.engineDefaults`) — read, not restated.
+    /// (Sharpness has no real entry here — its preset position depends on the layout's
+    /// scanline spacing; see `presetSharpness`.)
+    func presetValue(_ preset: CRTPreset, engineDefaults d: CRTParameters) -> Float {
+        switch self {
+        case .brightness:     return preset.brightness
+        case .contrast:       return preset.contrast
+        case .saturation:     return preset.saturation
+        case .peakHighlights: return d.display.peakAllowance
+        case .patternScale:   return d.phosphor.patternScale
+        case .patternFocus:   return d.phosphor.patternFocus
+        case .curvature:      return preset.faceplate.curvature
+        case .halation:       return preset.faceplate.halation
+        case .scatter:        return preset.faceplate.scatter
+        case .overscan:       return CRTFilter.defaultOverscan(for: preset)
+        case .vignette:       return preset.vignetteStrength
+        case .sharpness:      return 0.5
+        case .hBandwidth:     return d.beam.beamHorizontalRolloff
+        case .hFocus:         return d.beam.beamHorizontalSpot
+        case .shutter:        return d.display.observerShutter
+        case .edgeFocus:      return d.beam.edgeFocusDegradation
+        case .bloom:          return preset.dynamicBloomStrength
+        case .convergence:    return 0.0   // perfectly converged; the user dials in the error
+        case .hJitter:        return d.aging.horizontalInstability
+        case .vJitter:        return d.aging.verticalInstability
+        case .shotNoise:      return preset.beamShotNoise
+        case .signalNoise:    return d.aging.signalNoise
+        }
+    }
+
+    /// Write the dial into the engine's parameters. `pixelScale` is the engine's
+    /// own multiplier for quantities stated in reference pixels (CRTFilter.pixelScale):
+    /// convergence and horizontal jitter keep their visual size across render
+    /// resolutions, exactly as Phosphors pushes them.
+    func write(_ v: Float, into p: inout CRTParameters, pixelScale: Float) {
+        switch self {
+        case .brightness:     p.display.brightness = v
+        case .contrast:       p.display.contrast = v
+        case .saturation:     p.display.saturation = v
+        case .peakHighlights: p.display.peakAllowance = v
+        // Triad size in OUTPUT pixels (the engine resolves it per surface). Below
+        // about one pixel per stripe the mask integrates to flat — Triode-level.
+        case .patternScale:   p.phosphor.patternScale = v
+        // Declared intent only: the engine derives spill, dot sigma and depth per
+        // pattern (HostContract §3.2).
+        case .patternFocus:   p.phosphor.patternFocus = v
+        case .curvature:      p.display.faceplateCurvature = v
+        case .halation:       p.display.faceplateHalation = v
+        case .scatter:        p.display.faceplateScatter = v
+        case .overscan:       p.broadcast.overscan = v
+        case .vignette:       p.display.vignetteStrength = v
+        // Structural: Sharpness is CRTConfigurationRequest.beamFalloff, not a
+        // parameter write — the engine derives the beam width and applies its
+        // display-domain floor in the layout. See `reconfigure`.
+        case .sharpness:      break
+        case .hBandwidth:     p.beam.beamHorizontalRolloff = v
+        // Bipolar focus pot: 0 = focused; either direction defocuses, σ = |v|.
+        case .hFocus:         p.beam.beamHorizontalSpot = abs(v)
+        case .shutter:        p.display.observerShutter = v
+        case .edgeFocus:      p.beam.edgeFocusDegradation = v
+        case .bloom:          p.beam.dynamicBloomStrength = v
+        case .convergence:    p.beam.beamConvergence = v * pixelScale
+        case .hJitter:        p.aging.horizontalInstability = v * pixelScale
+        case .vJitter:        p.aging.verticalInstability = v
+        case .shotNoise:      p.beam.beamShotNoise = v
+        case .signalNoise:    p.aging.signalNoise = v
+        }
+    }
 }
 
-/// Vertical refresh (Hz) of the signal on the wire.
+// MARK: - Bridge state
+
+/// One live engine, plus the host's complete declaration of what it wants from it.
+private final class CRTBridgeState {
+    let device: MTLDevice
+    let filter: CRTFilter
+    let displayEnv = DisplayEnvironment()
+    /// The engine's parameters before this host touched any of them: where a dial that
+    /// no preset carries (video bandwidth, edge focus, pattern focus…) rests.
+    let engineDefaults: CRTParameters
+
+    // ---- What the tube is ----
+    var preset: CRTPreset?
+    var phosphor: PhosphorPreset?
+
+    // ---- The signal on the wire (crt_bridge_set_signal) ----
+    var contentSize: SIMD2<Int> = SIMD2(640, 480)
+    /// Vertical refresh of the SIGNAL the emulated card is sending, from its CRTC.
+    /// This is what the tube locks to — NOT the host panel's refresh (that is
+    /// `displayRefreshHz`). 0 = the card did not report it; the preset's rate stands in.
+    var signalRefreshHz: Float = 0
+    /// The tube refresh last written to the engine, to restart the beam cadence when
+    /// only the rate changed (same resolution, 60 → 72 Hz).
+    var appliedRefreshHz: Float = 0
+
+    // ---- The display (crt_bridge_set_drawable_size / update_display) ----
+    var drawableSize: CGSize
+    var displayRefreshHz: Float = 60
+
+    // ---- What the user chose ----
+    /// Dial overrides by `Dial.rawValue`. Absent = the preset's position.
+    var overrides: [Int32: Float] = [:]
+    /// Phosphor pattern override (0 triode … 3 slot). nil = the preset's.
+    var patternOverride: Int32? = nil
+    /// The beamFalloff last sent for the Sharpness dial, so a reconfigure starts
+    /// from the right beam instead of flashing the preset's for one layout.
+    var appliedFalloff: Float? = nil
+    /// The last layout line written to the signal log, so an unchanged layout is
+    /// logged once rather than once per reconfigure.
+    var lastLayoutLog: String = ""
+
+    // ---- What the engine decided ----
+    var layout: CRTScreenLayout?
+
+    /// The engine's display tail for an 8-bit drawable (band-limited place + SDR
+    /// encode). Rebuilt when the drawable's pixel format or transfer changes.
+    var compositor: DisplayCompositor? = nil
+    /// Viewport-sized float surface the display pass renders into on the 8-bit path.
+    /// The float (EDR) path draws straight into the drawable and needs none.
+    var displaySurface: MTLTexture? = nil
+
+    init(device: MTLDevice, filter: CRTFilter, drawableSize: CGSize) {
+        self.device = device
+        self.filter = filter
+        self.engineDefaults = filter.parameters
+        self.drawableSize = drawableSize
+        let hz = Float(displayEnv.info.maxRefreshRate)
+        if hz > 0 { displayRefreshHz = hz }
+    }
+
+    func value(_ dial: Dial) -> Float {
+        if let v = overrides[dial.rawValue] { return v }
+        return presetValue(dial)
+    }
+
+    /// Where the live preset starts a dial — what a reset returns to.
+    func presetValue(_ dial: Dial) -> Float {
+        if dial == .sharpness { return presetSharpness }
+        return preset.map { dial.presetValue($0, engineDefaults: engineDefaults) }
+            ?? dial.range.lowerBound
+    }
+
+    /// Where the preset's own beam sits on the Sharpness dial at the current layout.
+    /// The dial is anchored to the scanline cell, so the same beamFalloff reads as a
+    /// different position at a different scanline spacing — that spacing is the
+    /// ENGINE's number, read off the layout it chose.
+    var presetSharpness: Float {
+        guard let preset = preset, let layout = layout else { return 0.5 }
+        let spacing = max(2.0, layout.pixelsPerScanline)
+        let sigma = BeamSharpness.beamWidth(forFalloff: preset.beamFalloff, scanlineSpacing: spacing)
+        return BeamSharpness.sharpness(forSigma: sigma, scanlineSpacing: spacing)
+    }
+}
+
+// MARK: - The signal
+
+/// Vertical refresh (Hz) the tube runs at.
 ///
 /// A multisync monitor has no rate of its own — it LOCKS TO THE SIGNAL — so the rate
 /// comes from the card, never from the preset. 86Box reports its real CRTC-derived
@@ -125,381 +289,254 @@ private func signalScanlines(_ preset: CRTPreset, _ contentH: Int) -> Int {
 /// a card does not guess its own timing, it *is* the timing.
 ///
 /// When the card DOESN'T report (CGA/MDA/EGA keep their timings in their own structs and
-/// are not wired up yet), fall back to the PRESET's refresh — the CRT settings are the
-/// defaults for when there is no request from the API. This replaces a fabricated
-/// `contentH < 480 ? 70 : 60` guess: a real number the user chose beats an invented one,
-/// and it is what makes the flexible monochrome monitors honour their JSON default rate
-/// (e.g. amber's 70 Hz) instead of a resolution-based guess. Fixed-frequency presets (TVs)
-/// keep their own physical rate via the `multiSync` guard.
-private func signalRefreshHz(_ state: CRTBridgeState,
-                             _ preset: CRTPreset,
-                             _ contentH: Int) -> Float {
+/// are not wired up yet), fall back to the PRESET's refresh — a real number the user
+/// chose beats an invented one. Fixed-frequency presets (TVs) keep their own physical
+/// rate.
+private func tubeRefreshHz(_ state: CRTBridgeState, _ preset: CRTPreset) -> Float {
     guard preset.multiSync else { return preset.refreshRate }
-    if state.signalRefreshHz > 0 { return state.signalRefreshHz }   // the card's truth
-    return preset.refreshRate                                       // JSON default, not a guess
+    return state.signalRefreshHz > 0 ? state.signalRefreshHz : preset.refreshRate
 }
 
-/// Active phosphor pattern: host override if set, else the preset's.
-private func effectivePattern(_ state: CRTBridgeState) -> Int32 {
-    Int32(state.patternOverride ?? state.preset?.colorPhosphorPattern ?? 0)
+// MARK: - The declaration
+
+/// The complete configuration this host wants, as intent. Everything here is a SIGNAL
+/// fact (resolution, line count), a DISPLAY fact (drawable, refresh) or a USER choice
+/// (preset, pattern, Sharpness). Nothing here is a rendering decision — the layout,
+/// the buffer, the beam and the encoder are the engine's.
+private func makeRequest(_ state: CRTBridgeState,
+                         _ preset: CRTPreset,
+                         _ phosphor: PhosphorPreset) -> CRTConfigurationRequest {
+    var r = CRTConfigurationRequest(
+        preset: preset,
+        phosphor: phosphor,
+        contentSize: state.contentSize,
+        drawableSize: state.drawableSize,
+        displayRefreshRate: state.displayRefreshHz,
+        // 86Box presents 1:1 to a physical panel and never records.
+        renderIntent: .displayOnly)
+
+    if preset.multiSync {
+        // A multisync monitor paints exactly the raster it is sent, so the lines to
+        // scan are the signal's own count.
+        //
+        // This does NOT scan-double. Scan-doubling is the VIDEO CARD's job: a VGA card
+        // running a 200-line mode re-times it to 400 lines (CRTC `crtc[9]` bit 7)
+        // before it reaches the cable, and 86Box models that (`svga->linedbl`), so the
+        // raster arriving here is already doubled. A genuinely 200-line signal (a real
+        // CGA card) is painted as 200 lines — which is what a CGA monitor did.
+        let lines = max(1, min(state.contentSize.y, 2048))   // sanity bounds only
+        r.scanlineCount = lines
+        // The card KNOWS its mode, so the encode runs 1:1 at the signal's real pixel
+        // size. Left to derive it (lines × 4/3) the engine is right for the 4:3
+        // graphics modes by coincidence and wrong for text: DOS text is 720×400, and
+        // 400 × 4/3 = 533 — a quarter of the horizontal detail resampled away before
+        // the beam ever saw it. The non-square aspect is resolved where a real monitor
+        // resolves it: when the beam paints the signal across the 4:3 glass.
+        r.signalResolution = SIMD2(max(1, state.contentSize.x), lines)
+    }
+    // A fixed-frequency tube (a TV) has one raster it can paint: nil = the preset's
+    // lines, and the engine derives the encode from them.
+
+    r.colorPhosphorPattern = state.patternOverride            // nil = the preset's
+    r.beamFalloff = state.overrides[Dial.sharpness.rawValue] != nil ? state.appliedFalloff : nil
+    return r
 }
 
-/// Convergence is specified in 1920-px-reference units; scale to the actual
-/// phosphor render resolution (Phosphors does the same with `resScale`).
-private func applyConvergence(_ state: CRTBridgeState) {
-    state.filter.parameters.beam.beamConvergence = state.convergenceRaw * state.filter.pixelScale
-}
+/// Hand the current declaration to the engine, then write the things the request does
+/// not carry: the signal's true refresh, and the dials.
+///
+/// Safe to call whenever anything structural moved — `configure(_:)` diffs the request
+/// and changes only what the change implies.
+private func reconfigure(_ state: CRTBridgeState) {
+    guard let preset = state.preset, let phosphor = state.phosphor,
+          state.drawableSize.width > 0, state.drawableSize.height > 0 else { return }
 
-/// Re-apply every directly-set user override over the freshly-applied preset.
-/// Called after applyPreset (incl. on mode changes) so user picture/beam/condition
-/// adjustments aren't reset to preset defaults. (pattern/falloff/convergence are
-/// re-applied separately via the layout path.)
-private func applyUserOverrides(_ state: CRTBridgeState) {
-    if let v = state.brightnessOverride  { state.filter.parameters.display.brightness = v }
-    if let v = state.contrastOverride    { state.filter.parameters.display.contrast = v }
-    if let v = state.edgeFocusOverride   { state.filter.parameters.beam.edgeFocusDegradation = v }
-    if let v = state.bloomOverride        { state.filter.parameters.beam.dynamicBloomStrength = v }
-    if let v = state.hJitterOverride      { state.filter.parameters.aging.horizontalInstability = v }
-    if let v = state.vJitterOverride      { state.filter.parameters.aging.verticalInstability = v }
-    if let v = state.shotNoiseOverride    { state.filter.parameters.beam.beamShotNoise = v }
-    if let v = state.signalNoiseOverride  { state.filter.parameters.aging.signalNoise = v }
-    if let v = state.hBandwidthOverride   { state.filter.parameters.beam.beamHorizontalRolloff = v }
-    if let v = state.hFocusOverride       { state.filter.parameters.beam.beamHorizontalSpot = v }
-    // The beam is pinned to the DOT (its physical truth) unless a host has
-    // explicitly overridden it via crt_bridge_set_beam_segment (kept for ABI
-    // compat / diagnostics; the 86Box UI no longer exposes it).
-    state.filter.parameters.beam.beamSegmentFraction = state.beamSegmentOverride ?? 0.0
-    // (The emitter lattice this used to gate was deleted from CRTEngine
-    // 2026-08-12, commit a735bec — it was dormant machinery, never reachable
-    // from any host. `PhosphorParameters.latticeEnabled` no longer exists.)
-    if let v = state.shutterOverride      { state.filter.parameters.display.observerShutter = v }
-}
+    var request = makeRequest(state, preset, phosphor)
+    let first = state.filter.configure(request)
+    var layout = first.layout
+    var cadenceReset = first.cadenceReset
 
-/// Push host-display capabilities into the filter: refresh cadence and the LIVE
-/// EDR headroom. EDR is no longer a gain — the engine's highlight shoulder gives
-/// the tube's >1.0 peaks room up to min(peakAllowance, this headroom), and moving
-/// the window to an SDR panel instantly degrades to the SDR curve.
-private func applyDisplayEnvironment(_ state: CRTBridgeState) {
-    let env = state.displayEnv
-    state.filter.displayRefreshRate = Float(env.info.maxRefreshRate)
-    state.filter.displayHeadroom = Float(env.edrCurrent)
+    // Sharpness. The dial is perceptually linear over a Gaussian σ anchored to the
+    // SCANLINE CELL, so mapping it to beamFalloff needs the scanline spacing — the
+    // engine's number. Ask for a layout, read the spacing off it, and re-declare only
+    // if the falloff that spacing implies differs from the one just sent (it does not
+    // on an ordinary relayout, so this is normally one call).
+    if let s = state.overrides[Dial.sharpness.rawValue] {
+        let spacing = max(2.0, layout.pixelsPerScanline)
+        let sigma = BeamSharpness.sigma(forSharpness: s, scanlineSpacing: spacing)
+        let falloff = BeamSharpness.falloff(forSigma: sigma, scanlineSpacing: spacing)
+        if request.beamFalloff == nil || abs(falloff - (request.beamFalloff ?? 0)) > 1e-5 {
+            request.beamFalloff = falloff
+            let second = state.filter.configure(request)
+            layout = second.layout
+            cadenceReset = cadenceReset || second.cadenceReset
+        }
+        state.appliedFalloff = falloff
+    } else {
+        state.appliedFalloff = nil
+    }
+    state.layout = layout
 
-    // NOTE: stripeBrightnessBoost is no longer set here. As of CRTEngine 1.4.0 the
-    // energy-preserving mask (mask ÷ tile-mean) keeps brightness constant by construction,
-    // so the old 1/3-active-phosphor compensation is a dead no-op in the display shader
-    // (it survives only in comments there).
-}
+    // ---- What the request does not carry ----
+    var p = state.filter.parameters
 
-// MARK: - Internal helpers
+    // THE SIGNAL'S REFRESH. `CRTConfigurationRequest` has no field for it: the engine
+    // writes the PRESET's refresh, and only when the preset changes. A multisync tube
+    // locks to the card, so the card's rate is written here, after every configure.
+    // (One writer in practice — the engine's write happens once per preset — but it is
+    // a signal fact that belongs in the request; raised with the engine, not patched.)
+    let hz = tubeRefreshHz(state, preset)
+    p.timing.scanRate = hz
+    p.timing.crtRefreshRate = hz
+    // The source's content rate is a signal fact too (HostContract §3): 86Box feeds
+    // frames and lets the engine pace them, so it declares the card's measured rate,
+    // or 0 when the card does not report one. Only the NTSC pipeline acts on it.
+    p.timing.hostContentFrameRate = state.signalRefreshHz
+    p.timing.hostContentResolution = SIMD2(Int32(state.contentSize.x), Int32(state.contentSize.y))
+    // The beam is the dot — its physical truth, pinned, as in Phosphors. Steadiness is
+    // the observer's (the Shutter dial).
+    p.beam.beamSegmentFraction = 0.0
 
-private func applyPresetInternal(_ state: CRTBridgeState,
-                                 preset: CRTPreset,
-                                 phosphor: PhosphorPreset,
-                                 content: SIMD2<Int>) {
-    state.preset = preset
-    state.phosphor = phosphor
-    state.contentSize = content
+    let scale = state.filter.pixelScale
+    for dial in Dial.allCases {
+        dial.write(state.value(dial), into: &p, pixelScale: scale)
+    }
+    state.filter.parameters = p   // one assignment, one uniform update
 
-    // Multisync: the tube paints the raster it is sent, so the scanline structure is
-    // the signal's own line count. CRTEngine is used unmodified, so we apply the
-    // preset normally and then set the scanline count directly on the public timing
-    // parameters (the VGA encoder keeps the preset's max-output budget, which is fine).
-    let scanlines = signalScanlines(preset, content.y)
-    // Signal refresh tracks the mode for multisync monitors (e.g. 70 Hz for VGA
-    // 720×400 text, 60 Hz for 640×480+); fixed-freq tubes keep the preset's rate.
-    let refreshHz = signalRefreshHz(state, preset, content.y)
-    state.filter.applyPreset(preset, phosphor: phosphor, contentSize: content)
-    state.filter.parameters.timing.scanRate = refreshHz
-    state.filter.parameters.timing.crtRefreshRate = refreshHz
-    state.filter.parameters.timing.interlaced = preset.interlaced
-    state.filter.parameters.timing.scanlineCount = Int32(scanlines)
-
-    // Point the VGA encoder at the ACTUAL signal — the card knows its mode, so the
-    // preset's default resolution is overridden. The encode then runs 1:1 and every
-    // sample the card sent survives to the beam.
-    //
-    // The width must come from the SIGNAL, not from the tube's aspect ratio. The
-    // preset-driven `configureMaxOutput` derives width as scanlineCount × 4/3, which is
-    // right for the 4:3 graphics modes by coincidence (480×4/3 = 640, 600×4/3 = 800,
-    // 768×4/3 = 1024) and wrong for the text modes, which have NON-SQUARE pixels: DOS
-    // text is 720×400, and 400×4/3 = 533 — so a quarter of the horizontal detail was
-    // resampled away before the beam ever saw the signal, and 9px character cells went
-    // soft. The non-square aspect is real and is resolved where a real monitor resolves
-    // it: when the beam paints the signal across the 4:3 glass.
-    //
-    // `scanlines` is the signal's line count for a multisync tube, or the preset's fixed
-    // raster for a fixed-frequency tube — the raster the beam actually paints.
-    if state.filter.isVGAPipeline {
-        state.filter.vgaEncoder?.configureSignalResolution(width: content.x,
-                                                           height: scanlines,
-                                                           refreshRate: refreshHz)
-        state.filter.vgaEncoder?.configure(sourceWidth: content.x,
-                                           sourceHeight: content.y,
-                                           refreshRate: refreshHz)
+    // A rate-only change (640×480 at 60 → 72 Hz) is not in the engine's structural
+    // key — that carries the preset's rate — so restart the cadence for it here.
+    if abs(hz - state.appliedRefreshHz) > 0.05 {
+        if !cadenceReset { state.filter.resetFrameCounter() }
+        state.appliedRefreshHz = hz
     }
 
-    state.scaling = ScalingManager(scanlineCount: scanlines,
-                                   aspectRatio: 4.0 / 3.0)
-    state.scaling.enforceAspectRatio = true
-    state.scaling.interlaced = preset.interlaced
-    recomputeLayout(state)
-    // Pattern just changed (via the layout) → recompute EDR/stripe compensation.
-    applyDisplayEnvironment(state)
-    // Re-apply user picture/beam/condition overrides over the preset defaults.
-    applyUserOverrides(state)
+    state.filter.displayHeadroom = Float(state.displayEnv.edrCurrent)
+    logLayout(state, layout)
 }
 
-/// DIAGNOSTIC (temporary): record the layout the engine actually chose.
-///
-/// The existing log carries the SIGNAL and the DISPLAY but not the DECISION, which left the
-/// interesting numbers — the phosphor buffer, the buffer→viewport ratio, and above all the
-/// scanline pitch as it lands ON THE GLASS — to be guessed at from screenshots. They are not
-/// guessable: a screenshot is resampled on the way to being viewed, which manufactures
-/// exactly the kind of beat we are chasing. Same file as the host's signal/display lines
-/// (a Finder-launched .app has nowhere to put stderr).
-private func logLayout(_ state: CRTBridgeState,
-                       _ l: CRTScreenLayout,
-                       _ panelScale: Float) {
-    guard let home = ProcessInfo.processInfo.environment["HOME"],
-          let f = FileHandle(forWritingAtPath: home + "/Library/Logs/86Box-crt-signal.log")
-    else { return }
-    defer { try? f.close() }
-    f.seekToEndOfFile()
+/// Push one dial without a relayout (everything except Sharpness).
+private func applyDial(_ state: CRTBridgeState, _ dial: Dial) {
+    if dial == .sharpness {
+        reconfigure(state)
+        return
+    }
+    var p = state.filter.parameters
+    dial.write(state.value(dial), into: &p, pixelScale: state.filter.pixelScale)
+    state.filter.parameters = p
+}
 
+/// DIAGNOSTIC: record the layout the engine actually chose.
+///
+/// The signal and display lines in the same file say what went IN; this says what the
+/// engine DECIDED — the phosphor buffer, the buffer→viewport ratio, and above all the
+/// scanline pitch as it lands ON THE GLASS. They are not guessable from a screenshot: a
+/// screenshot is resampled on the way to being viewed, which manufactures exactly the
+/// kind of beat one is usually chasing. (A Finder-launched .app has nowhere to put
+/// stderr, hence the file.)
+private func logLayout(_ state: CRTBridgeState, _ l: CRTScreenLayout) {
     let vpH = Float(l.viewport.height)
     let vpW = Float(l.viewport.width)
-    // THE number: scanline pitch on the panel. The phosphor buffer cancels out of it
-    // (k·vpH / k·scanlines), so this is what the beat — if any — has to be explained by.
+    // THE number: scanline pitch on the panel. The phosphor buffer cancels out of it.
     let displayedPitch = vpH / Float(max(1, l.scanlineCount))
-    // Buffer→viewport ratio. 1.0 = no resample; anything else resamples the comb + mask.
+    // Buffer→viewport ratio. 1.0 = no resample; anything else resamples the comb.
     let ratio = vpH / Float(max(1, l.phosphorHeight))
-    // Displayed RGB stripe width in drawable px (what the mask actually looks like).
-    let displayedStripe = l.stripePitch * vpW / Float(max(1, l.phosphorWidth))
 
     let line = String(
-        format: "layout -> signal %dx%d%@ | drawable %.0fx%.0f | viewport %.0fx%.0f"
+        format: "layout -> signal %dx%d%@ @ %.3f Hz | drawable %.0fx%.0f | viewport %.0fx%.0f"
               + " | buffer %dx%d (k=%.3f) | displayedPitch %.4f px/scanline"
-              + " | buf->vp %.5f | renderW %d | beamW %.3f vis %.3f"
-              + " | stripePitch %.3f buf -> %.3f px | panelScale %.4f\n",
+              + " | buf->vp %.5f | renderW %d | beamW %.3f vis %.3f | pattern %d\n",
         state.contentSize.x, l.scanlineCount, l.interlaced ? " INTERLACED" : "",
+        state.filter.parameters.timing.crtRefreshRate,
         Float(state.drawableSize.width), Float(state.drawableSize.height),
         vpW, vpH,
         l.phosphorWidth, l.phosphorHeight,
         Float(l.phosphorHeight) / Float(max(1, l.scanlineCount)),
         displayedPitch, ratio, l.renderWidth,
-        l.beamWidth, l.scanlineVisibility,
-        l.stripePitch, displayedStripe, panelScale)
+        l.beamWidth, l.scanlineVisibility, l.colorPhosphorPattern)
+    guard line != state.lastLayoutLog else { return }   // a decision is logged once
+    state.lastLayoutLog = line
+
+    guard let home = ProcessInfo.processInfo.environment["HOME"],
+          let f = FileHandle(forWritingAtPath: home + "/Library/Logs/86Box-crt-signal.log")
+    else { return }
+    defer { try? f.close() }
+    f.seekToEndOfFile()
     f.write(Data(line.utf8))
-}
-
-private func recomputeLayout(_ state: CRTBridgeState) {
-    guard let preset = state.preset,
-          state.drawableSize.width > 0, state.drawableSize.height > 0 else { return }
-    _ = state.scaling.updateDrawableSize(state.drawableSize)
-    let scanlines = signalScanlines(preset, Int(state.contentSize.y))
-
-    // Panel-anchored pitch is gone from CRTEngine: `DisplayInfo.nativePixelWidth`
-    // (the field this used to read) was deleted 2026-08-12/13 along with the rest
-    // of the panel-PPI model — stripe pitch is now derived purely from the preset's
-    // physical tube geometry (tvSizeInches × phosphorPitchMM), never host PPI. The
-    // `CRTLayoutInputs.backingToPanelScale` parameter below is consequently orphaned
-    // (no reader left in ScalingManager, verified by grep) but is kept at its
-    // identity value since the struct still declares it.
-    let panelScale: Float = 1.0
-
-    // Build the layout with the preset's beam, then — only if the user moved the
-    // sharpness dial — rebuild it with the mapped falloff.
-    //
-    // The dial is a perceptually-linear UI mapping onto a Gaussian σ anchored to the
-    // SCANLINE CELL, so the full travel stays useful at any resolution (raw beamFalloff
-    // is wildly non-linear; all the visible change lives in ~0.7…0.9). That mapping needs
-    // the scanline spacing — which is the ENGINE's number, not ours. So we ask the engine
-    // for a layout, read `pixelsPerScanline` off it, and map against that. The bridge used
-    // to estimate the spacing itself from a render width it also computed itself; both are
-    // engine decisions, and re-deriving them here is exactly how the two drift apart.
-    // computeLayout is pure arithmetic, so the second pass is free.
-    func layout(beamFalloff: Float) -> CRTScreenLayout {
-        state.scaling.computeLayout(makeInputs(state, preset, scanlines, beamFalloff, panelScale))
-    }
-    var chosen = layout(beamFalloff: preset.beamFalloff)
-    if let s = state.sharpnessOverride {
-        let spacing = max(2.0, chosen.pixelsPerScanline)
-        let sigma = BeamSharpness.sigma(forSharpness: s, scanlineSpacing: spacing)
-        chosen = layout(beamFalloff: BeamSharpness.falloff(forSigma: sigma, scanlineSpacing: spacing))
-    }
-
-    state.scaling.applyLayoutState(chosen)
-    // Pattern Scale (RGB mask coarsening) — the engine's display mask reads
-    // `parameters.phosphor.patternScale` (ScalingManager.maskGeometry via
-    // CRTFilter.maskLockUniforms), NOT the `patternScale:` argument to
-    // `filter.apply`. That argument only multiplies the layout's stripeScale/stripePitch
-    // for the shadow/slot tile path; the display mask path ignores it. So the slider was
-    // inert (and the pattern picker showed nothing, because a 1.0 patternScale is
-    // sub-Nyquist on a fine tube) until this write landed. Phosphors sets the same field
-    // directly (Renderer+Presets.swift). The CRTLayoutInputs.displayMaskScale field is
-    // orphaned in CRTEngine 1.4.0 (stored, never read) — do not set it in makeInputs.
-    state.filter.parameters.phosphor.patternScale = state.displayMaskScale
-    state.filter.apply(chosen, patternScale: state.displayMaskScale)
-    logLayout(state, chosen, panelScale)
-
-    // NOT set here any more: maskLODBias. `filter.apply(layout)` derives it from the
-    // layout's render width (engine policy, MaskLOD) — the bridge was recomputing the
-    // identical number and pushing it straight back in.
-
-    // Re-apply convergence — pixelScale tracks the engine's render resolution, and
-    // apply(layout) can reset beam params. Keeps the user's setting consistent.
-    // (Still host-side: the engine takes convergence in phosphor pixels, so someone has
-    // to scale the user's resolution-independent value. Engine-side would be better —
-    // METAL_CRT_FUTURE_CLEANUP item 6.)
-    applyConvergence(state)
-}
-
-/// The facts the engine needs to decide a layout. Everything here is either a SIGNAL fact
-/// (scanline count, interlace), a PRESET fact (tube geometry, phosphor), a DISPLAY fact
-/// (drawable size, panel scale), or a USER choice (pattern, mask scale). Nothing here is a
-/// rendering decision — those belong to CRTEngine.
-private func makeInputs(_ state: CRTBridgeState,
-                        _ preset: CRTPreset,
-                        _ scanlines: Int,
-                        _ beamFalloff: Float,
-                        _ panelScale: Float) -> CRTLayoutInputs {
-    CRTLayoutInputs(
-        scanlineCount: scanlines,
-        aspectRatio: 4.0 / 3.0,
-        drawableSize: state.drawableSize,
-        enforceAspectRatio: true,
-        interlaced: preset.interlaced,
-        beamFalloff: beamFalloff,
-        phosphorMode: Int32(preset.phosphorMode),
-        // Phosphor pattern: host override (picker) if set, else the preset's
-        // (0=triode, 1=stripe/aperture grille, 2=shadow mask, 3=slot).
-        colorPhosphorPattern: effectivePattern(state),
-        // Physical screen geometry comes from the preset, not hardcoded guesses —
-        // these drive the stripe/mask pitch. (Was 14"/0.25mm/1.0.)
-        tvSizeInches: preset.tvSizeInches,
-        phosphorPitchMM: preset.phosphorPitchMM,
-        phosphorMagnification: preset.phosphorMagnification,
-        // RENDER RESOLUTION IS THE ENGINE'S DECISION (D2). 0 = "you decide": for
-        // .displayOnly the engine sizes the phosphor buffer from its own viewport
-        // (ScalingManager.autoDisplayRenderWidth). The bridge used to compute the
-        // aspect-fitted content width and call that policy itself — deciding, with extra
-        // steps. `renderWidthOverride` is non-zero only when the user pins it explicitly
-        // (crt_bridge_set_render_resolution).
-        renderResolutionWidth: state.renderWidthOverride,
-        // No minStripePixels. It is NOT passed because there is no floor to arm: the
-        // engine accepted, clamped and documented that parameter while discarding it
-        // unread, so the 2.0 this used to pass armed nothing. Dropped from CRTEngine in
-        // chore/drop-unread-minstripepixels. Omitting it compiles against the engine
-        // both before and after that change, so this file does not need to move in step
-        // with the merge. If stripe coarsening lands later it will bring a parameter
-        // that is actually read — wire that one up then, not this one.
-        // 86Box presents 1:1 to a physical panel and never records — display-only. There
-        // is no movie resolution to balance the mask against, unlike Phosphors.
-        renderIntent: .displayOnly,
-        // Orphaned in current CRTEngine (no reader in ScalingManager — the panel-PPI
-        // pitch model this fed was removed 2026-08-12/13). Kept at identity; see
-        // `panelScale` above.
-        backingToPanelScale: panelScale,
-        // Scanline anti-alias strength, PINNED at 1.0 — the engine's full,
-        // measured-safe display-domain beam-sigma floor (0.9 display px).
-        //
-        // This was a host dial until 2026-08-22. It is not one any more, because its
-        // sharp half relaxes that floor toward ~0.55 display px, and the floor is the
-        // only thing standing between the scanline comb and the panel's Nyquist limit.
-        // Above VGA there is nothing to buy on the other side of that trade: at 768
-        // lines in a 1440-tall viewport the displayed pitch is 1.875 px, so there are
-        // no resolvable scanline gaps to sharpen — the sharp end spends the floor and
-        // returns aliasing. Measured on this host: at 0.078 the comb folded to a 15 px
-        // beat carrying 8x the amplitude of the same picture in Phosphors.
-        //
-        // Phosphors reached the same place from the other direction — it dropped its
-        // Scanline Smooth slider and pins the model value at 1.0. Both hosts now agree.
-        scanlineSmoothing: 1.0
-        // NOTE: displayMaskScale is NOT passed — it's orphaned in CRTEngine 1.4.0 (stored,
-        // never read). Pattern Scale is applied via filter.apply(patternScale:) in recomputeLayout.
-    )
 }
 
 // MARK: - C ABI: creation
 
 @_cdecl("crt_bridge_create")
 public func crt_bridge_create(_ devicePtr: UnsafeMutableRawPointer,
-                              _ phosphorW: Int32,
-                              _ phosphorH: Int32) -> UnsafeMutableRawPointer? {
-    return makeBridge(devicePtr, phosphorW, phosphorH)
-}
-
-private func makeBridge(_ devicePtr: UnsafeMutableRawPointer,
-                        _ phosphorW: Int32,
-                        _ phosphorH: Int32) -> UnsafeMutableRawPointer? {
+                              _ drawableW: Int32,
+                              _ drawableH: Int32) -> UnsafeMutableRawPointer? {
     guard let device = object(devicePtr, as: MTLDevice.self) else {
         NSLog("[CRTBridge] create: not an MTLDevice")
         return nil
     }
-    guard let filter = CRTFilter(device: device,
-                                 width: Int(phosphorW), height: Int(phosphorH)) else {
+    let w = max(1, Int(drawableW)), h = max(1, Int(drawableH))
+    // The initial buffer size is a placeholder: the first configure sizes it properly.
+    guard let filter = CRTFilter(device: device, width: w, height: h) else {
         NSLog("[CRTBridge] create: CRTFilter init failed (shader bundle/metallib?)")
         return nil
     }
-    let scaling = ScalingManager(scanlineCount: 480, aspectRatio: 4.0 / 3.0)
-    let state = CRTBridgeState(device: device, filter: filter, scaling: scaling)
-    state.filter.resize(width: Int(phosphorW), height: Int(phosphorH))
+    let state = CRTBridgeState(device: device, filter: filter,
+                               drawableSize: CGSize(width: w, height: h))
     return Unmanaged.passRetained(state).toOpaque()
 }
 
-// MARK: - C ABI: preset selection
-
-@_cdecl("crt_bridge_apply_preset")
-public func crt_bridge_apply_preset(_ ref: UnsafeMutableRawPointer,
-                                    _ namePtr: UnsafePointer<CChar>,
-                                    _ contentW: Int32,
-                                    _ contentH: Int32) -> Bool {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    let name = String(cString: namePtr)
-    guard let loaded = PresetLoader.loadPresets(),
-          let preset = loaded.crts.first(where: { $0.name == name }) else {
-        NSLog("[CRTBridge] apply_preset: preset '%@' not found", name)
-        return false
-    }
-    applyPresetInternal(state, preset: preset,
-                        phosphor: loaded.phosphors[preset.phosphorIndex],
-                        content: SIMD2(Int(contentW), Int(contentH)))
-    return true
+@_cdecl("crt_bridge_destroy")
+public func crt_bridge_destroy(_ ref: UnsafeMutableRawPointer) {
+    Unmanaged<CRTBridgeState>.fromOpaque(ref).release()
 }
 
-/// Switch to a different CRT preset at runtime, at the CURRENT content size, keeping
-/// the user's live overrides (applyPresetInternal re-applies them). For the options
-/// UI's preset picker. Returns false if the name is unknown.
+// MARK: - C ABI: presets
+
+@_cdecl("crt_bridge_preset_count")
+public func crt_bridge_preset_count() -> Int32 {
+    Int32(PresetLibrary.crts.count)
+}
+
+@_cdecl("crt_bridge_preset_name")
+public func crt_bridge_preset_name(_ index: Int32) -> UnsafePointer<CChar>? {
+    guard PresetLibrary.cNames.indices.contains(Int(index)),
+          let p = PresetLibrary.cNames[Int(index)] else { return nil }
+    return UnsafePointer(p)
+}
+
+/// Index of the live preset in the engine's list, or -1 before one is set.
+@_cdecl("crt_bridge_current_preset")
+public func crt_bridge_current_preset(_ ref: UnsafeMutableRawPointer) -> Int32 {
+    let state = bridgeState(ref)
+    guard let name = state.preset?.name,
+          let i = PresetLibrary.crts.firstIndex(where: { $0.name == name }) else { return -1 }
+    return Int32(i)
+}
+
+/// Switch the tube. The user's dial overrides are kept and re-applied over the new
+/// preset's starting positions. Returns false if the name is unknown.
 @_cdecl("crt_bridge_set_preset")
 public func crt_bridge_set_preset(_ ref: UnsafeMutableRawPointer,
                                   _ namePtr: UnsafePointer<CChar>) -> Bool {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
+    let state = bridgeState(ref)
     let name = String(cString: namePtr)
-    guard let loaded = PresetLoader.loadPresets(),
-          let preset = loaded.crts.first(where: { $0.name == name }) else {
+    guard let found = PresetLibrary.find(name) else {
         NSLog("[CRTBridge] set_preset: preset '%@' not found", name)
         return false
     }
-    applyPresetInternal(state, preset: preset,
-                        phosphor: loaded.phosphors[preset.phosphorIndex],
-                        content: state.contentSize)
+    state.preset = found.preset
+    state.phosphor = found.phosphor
+    reconfigure(state)
     return true
 }
 
-// MARK: - C ABI: dynamic state
-
-/// Re-apply the current preset at a new emulated resolution (86Box mode change).
-/// Prefer crt_bridge_set_signal, which carries the refresh too; this leaves the
-/// refresh at whatever was last reported.
-@_cdecl("crt_bridge_set_content_size")
-public func crt_bridge_set_content_size(_ ref: UnsafeMutableRawPointer,
-                                        _ contentW: Int32,
-                                        _ contentH: Int32) {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    guard let preset = state.preset, let phosphor = state.phosphor else { return }
-    applyPresetInternal(state, preset: preset, phosphor: phosphor,
-                        content: SIMD2(Int(contentW), Int(contentH)))
+/// True when the live tube is a colour tube (it has a phosphor pattern to choose).
+@_cdecl("crt_bridge_is_color")
+public func crt_bridge_is_color(_ ref: UnsafeMutableRawPointer) -> Bool {
+    bridgeState(ref).filter.parameters.phosphor.phosphorMode == 1
 }
+
+// MARK: - C ABI: the signal and the display
 
 /// THE SIGNAL ON THE WIRE — one atomic description of what the emulated card is
 /// sending: active resolution and the card's true vertical refresh (from its CRTC).
@@ -509,320 +546,225 @@ public func crt_bridge_set_content_size(_ ref: UnsafeMutableRawPointer,
 /// video card. The bridge's job is only to be an HONEST card — real timings, no
 /// invention — and CRTEngine's job is to respond correctly to whatever arrives.
 ///
-/// Resolution and refresh change together on a mode switch, so they are set together;
-/// setting them in two calls would leave the engine briefly timed against the old
-/// mode's rate at the new mode's resolution.
-///
+/// Resolution and refresh change together on a mode switch, so they are set together.
 /// `refreshHz` = 0 means the card doesn't report its timing (CGA/MDA/EGA today) —
-/// the bridge then falls back to the VGA standards table.
+/// the preset's rate then stands in.
 @_cdecl("crt_bridge_set_signal")
 public func crt_bridge_set_signal(_ ref: UnsafeMutableRawPointer,
                                   _ activeW: Int32,
                                   _ activeH: Int32,
                                   _ refreshHz: Float) {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    guard let preset = state.preset, let phosphor = state.phosphor else { return }
-
-    let content = SIMD2(Int(activeW), Int(activeH))
+    let state = bridgeState(ref)
+    let content = SIMD2(max(1, Int(activeW)), max(1, Int(activeH)))
     // Ignore absurd rates rather than time the beam against garbage; 0 = not reported.
     let hz: Float = (refreshHz > 20.0 && refreshHz < 200.0) ? refreshHz : 0.0
 
-    // Re-locking is expensive (rebuilds the layout, scaler and VGA encoder), so only a
-    // REAL sync change counts. The CRTC's derived rate jitters in the last decimal
-    // (70.086 vs 70.087 on the same mode); a tube would not re-lock over a millihertz.
+    // Only a REAL sync change counts. The CRTC's derived rate jitters in the last
+    // decimal (70.086 vs 70.087 on the same mode); a tube would not re-lock over a
+    // millihertz.
     let resolutionChanged = content != state.contentSize
     let refreshChanged    = abs(hz - state.signalRefreshHz) > 0.05   // Hz
     guard resolutionChanged || refreshChanged else { return }
 
+    state.contentSize = content
     state.signalRefreshHz = hz
-    applyPresetInternal(state, preset: preset, phosphor: phosphor, content: content)
+    reconfigure(state)
 }
 
-@_cdecl("crt_bridge_set_display_refresh")
-public func crt_bridge_set_display_refresh(_ ref: UnsafeMutableRawPointer,
-                                           _ hz: Float) {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    state.filter.displayRefreshRate = hz
-}
-
-/// Report the PHYSICAL DISPLAY to the engine: geometry, PPI, EDR headroom, refresh —
-/// everything CRTEngine needs to render optimally for this panel. `screenPtr` is an
-/// NSScreen* (or NULL for the main screen).
-///
-/// Call at init AND on every event that changes the display: window moved to another
-/// screen, resolution or scaled-mode change, backing-scale change, EDR/HDR change,
-/// display connect/disconnect. The host's only job here is to notice and report; the
-/// engine decides what to do about it (mask pitch, render resolution, HDR dimming).
-///
-/// This re-runs the LAYOUT, not just the EDR/brightness compensation: under
-/// `.displayOnly` the phosphor pitch is anchored to the panel's physical pixels and
-/// the render width is derived from it, so a new panel means a new layout. Updating
-/// the environment without re-laying-out would leave the engine rendering a mask
-/// sized for the display it is no longer on.
-@_cdecl("crt_bridge_update_display")
-public func crt_bridge_update_display(_ ref: UnsafeMutableRawPointer,
-                                      _ screenPtr: UnsafeMutableRawPointer?) {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    let screen: NSScreen? = screenPtr.map {
-        Unmanaged<NSScreen>.fromOpaque($0).takeUnretainedValue()
-    }
-    state.displayEnv.updateScreen(screen ?? NSScreen.main)
-    recomputeLayout(state)          // panel-anchored pitch + render width re-derive
-    applyDisplayEnvironment(state)  // EDR boost + stripe compensation (needs the new pattern)
-}
-
-/// The display's currently-available EDR headroom (1.0 = SDR, >1 = HDR capable).
-/// The host uses this to decide whether to put its CAMetalLayer in EDR mode.
-// Returns the panel's POTENTIAL headroom (capability): the host decides the layer
-// format from this. Using CURRENT here is the classic EDR chicken-and-egg — current
-// reads 1.0 until EDR content is on screen, so the layer never goes EDR and EDR
-// never engages. The live CURRENT headroom is what clamps the highlight ceiling,
-// re-read per frame in crt_bridge_present.
-@_cdecl("crt_bridge_edr_headroom")
-public func crt_bridge_edr_headroom(_ ref: UnsafeMutableRawPointer) -> Float {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    return Float(state.displayEnv.edrPotential)
-}
-
-/// Set the fixed phosphor render width (px). Higher = finer stripes/mask, more
-/// GPU. 0 = render at the window size. Re-lays-out immediately.
-@_cdecl("crt_bridge_set_render_resolution")
-public func crt_bridge_set_render_resolution(_ ref: UnsafeMutableRawPointer,
-                                             _ width: Int32) {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    state.renderWidthOverride = Int(max(0, width))   // 0 = let the engine decide
-    recomputeLayout(state)
-}
-
-/// `.displayOnly` RGB mask scale (Pattern Scale): a multiplier of the engine's physical
-/// phosphor pitch. 1.0 = the tube's real pitch; higher coarsens the grille so it reads at
-/// smaller sizes (a fine VGA tube is sub-Nyquist at typical windows and needs several ×).
-/// CRTEngine 1.4.0 supports 1–10×; clamped to match.
-@_cdecl("crt_bridge_set_mask_scale")
-public func crt_bridge_set_mask_scale(_ ref: UnsafeMutableRawPointer, _ scale: Float) {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    state.displayMaskScale = max(1.0, min(10.0, scale))
-    recomputeLayout(state)
-}
-
-/// Turn HDR (EDR peak-brightness boost) on/off. On → auto (use the display's EDR
-/// headroom); off → clamp to SDR. The mask-dim above still governs how the mask
-/// reacts while HDR is on.
-/// Peak highlights (replaces the old HDR on/off + boost): how far the tube's
-/// >1.0 peaks (mask sparkle, small-area highlights) may render above reference
-/// white [1.0 … 3.0]. 1.0 = SDR look on every panel. Always capped by the LIVE
-/// panel headroom in the engine's highlight shoulder — the picture body (≤0.85×
-/// reference) is identity on every panel, so this can never blow out the image.
-@_cdecl("crt_bridge_set_peak_highlights")
-public func crt_bridge_set_peak_highlights(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    state.filter.parameters.display.peakAllowance = max(1.0, min(16.0, v))
-}
-
-// MARK: - C ABI: picture + phosphor pattern + monitor conditions
-
-/// Picture brightness DC offset (≈ -0.4 … +0.5; 0 = neutral).
-@_cdecl("crt_bridge_set_brightness")
-public func crt_bridge_set_brightness(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    s.brightnessOverride = v
-    s.filter.parameters.display.brightness = v
-}
-
-/// Picture contrast gain (≈ 0.1 … 3.0; preset default ~1.5).
-@_cdecl("crt_bridge_set_contrast")
-public func crt_bridge_set_contrast(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    s.contrastOverride = v
-    s.filter.parameters.display.contrast = v
-}
-
-/// Phosphor pattern override: 0=triode, 1=stripe (aperture grille), 2=shadow
-/// mask, 3=slot mask. Re-lays out and refreshes mask/brightness state.
-@_cdecl("crt_bridge_set_phosphor_pattern")
-public func crt_bridge_set_phosphor_pattern(_ ref: UnsafeMutableRawPointer, _ pattern: Int32) {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    state.patternOverride = Int(max(0, min(3, pattern)))
-    recomputeLayout(state)
-    // (No applyDisplayEnvironment here: refresh/EDR don't depend on pattern, and the old
-    // pattern-dependent stripeBrightnessBoost it used to refresh is gone as of 1.4.0.)
-}
-
-/// RGB convergence error, bipolar [-10, 10]: 0 = perfectly aligned, sign chooses
-/// the fringing direction (guns misconverge left vs right), magnitude = severity.
-@_cdecl("crt_bridge_set_convergence")
-public func crt_bridge_set_convergence(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    state.convergenceRaw = max(-10.0, min(10.0, v))
-    applyConvergence(state)
-}
-
-/// Horizontal jitter: per-scanline horizontal shift in pixels (0 … ~3).
-@_cdecl("crt_bridge_set_h_jitter")
-public func crt_bridge_set_h_jitter(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    s.hJitterOverride = v
-    s.filter.parameters.aging.horizontalInstability = v
-}
-
-/// Vertical jitter: per-frame vertical bounce in scanlines (0 … ~2).
-@_cdecl("crt_bridge_set_v_jitter")
-public func crt_bridge_set_v_jitter(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    s.vJitterOverride = v
-    s.filter.parameters.aging.verticalInstability = v
-}
-
-/// Beam sharpness dial: 0 = soft (beam fills the scanline cell), 1 = sharp
-/// (tight Nyquist-limited beam, crisp scanlines). Perceptually linear and
-/// resolution-aware. Drives beam width + scanline visibility, so it re-lays-out.
-@_cdecl("crt_bridge_set_sharpness")
-public func crt_bridge_set_sharpness(_ ref: UnsafeMutableRawPointer, _ s: Float) {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    state.sharpnessOverride = max(0.0, min(1.0, s))
-    recomputeLayout(state)
-}
-
-/// Edge focus degradation: beam defocus toward the screen edges (0 … 1).
-@_cdecl("crt_bridge_set_edge_focus")
-public func crt_bridge_set_edge_focus(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    s.edgeFocusOverride = v
-    s.filter.parameters.beam.edgeFocusDegradation = v
-}
-
-/// Dynamic bloom: beam widening with brightness / space-charge (0 … ~0.5).
-@_cdecl("crt_bridge_set_bloom")
-public func crt_bridge_set_bloom(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    s.bloomOverride = v
-    s.filter.parameters.beam.dynamicBloomStrength = v
-}
-
-/// Per-pixel shot noise (0 = off; ~0.03 = subtle grain).
-@_cdecl("crt_bridge_set_shot_noise")
-public func crt_bridge_set_shot_noise(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    s.shotNoiseOverride = v
-    s.filter.parameters.beam.beamShotNoise = v
-}
-
-/// Horizontal video bandwidth — the raised-cosine reconstruction rolloff β
-/// [0 … 1.0]. Lower = wider flat passband = sharper (but the sinc-derived filter's
-/// negative lobes ring more on hard edges); higher = softer rolloff, less ringing.
-/// 0 drops to CRTEngine's legacy Gaussian spot (`sampleBeamHSpot`), which is
-/// strictly positive — genuinely ringless, a pristine digital-VGA look — at the
-/// cost of losing the anti-banding reconstruction's resample-beat protection on
-/// modes where the render buffer isn't an integer multiple of the signal. That
-/// trade-off is the host's call to make per mode/preset, not a fixed floor.
-@_cdecl("crt_bridge_set_h_bandwidth")
-public func crt_bridge_set_h_bandwidth(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    let b = max(0.0, min(1.0, v))
-    s.hBandwidthOverride = b
-    s.filter.parameters.beam.beamHorizontalRolloff = b
-}
-
-/// Horizontal optical focus blur σ in source pixels [0 … 2]. 0 = perfectly
-/// focused (default); higher = defocused beam. Purely aesthetic — the anti-banding
-/// reconstruction above is independent of this.
-@_cdecl("crt_bridge_set_h_focus")
-public func crt_bridge_set_h_focus(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    // Bipolar focus pot: 0 = focused; both directions defocus, σ = |v|.
-    let f = min(3.0, abs(v))
-    s.hFocusOverride = f
-    s.filter.parameters.beam.beamHorizontalSpot = f
-}
-
-/// Beam temporal resolution [0 … 1] — SIMULATION control, not a shader dial.
-/// 1 = the whole scanline is excited at one instant (legacy engine, bit-exact,
-/// zero flicker). Below 1 the beam becomes a segmented dot covering that
-/// fraction of the line: cells get real per-segment excitation times, decay
-/// from their own age, and the display integrates emission over the frame
-/// (exposure model) — flicker/shimmer emerge physically as the dial approaches
-/// a dot. 0 maps to the engine's shortest segment (1/1024 of a line).
-@_cdecl("crt_bridge_set_beam_segment")
-public func crt_bridge_set_beam_segment(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    // The user dial lives entirely in the new beam simulation: 1.00 = the new
-    // physics fully fused, not the legacy engine (exact 1.0 stays an internal
-    // identity-harness anchor), so the top maps just below it.
-    let f = max(0.0, min(0.9995, v))
-    s.beamSegmentOverride = f
-    s.filter.parameters.beam.beamSegmentFraction = f
-}
-
-/// OBSERVER dial ("Shutter") [0 … 1]: how the viewer integrates the tube's
-/// pulsing emission. 1 = fully fused (rested eye — steady); lower = an
-/// ever-faster camera shutter — rolling band and flicker, the filmed-CRT look.
-@_cdecl("crt_bridge_set_shutter")
-public func crt_bridge_set_shutter(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    let f = max(0.0, min(1.0, v))
-    s.shutterOverride = f
-    s.filter.parameters.display.observerShutter = f
-}
-
-
-/// Additive signal noise / snow (0 … ~0.15).
-@_cdecl("crt_bridge_set_signal_noise")
-public func crt_bridge_set_signal_noise(_ ref: UnsafeMutableRawPointer, _ v: Float) {
-    let s = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    s.signalNoiseOverride = v
-    s.filter.parameters.aging.signalNoise = v
-}
-
+/// The drawable the picture is presented into, in device pixels.
 @_cdecl("crt_bridge_set_drawable_size")
 public func crt_bridge_set_drawable_size(_ ref: UnsafeMutableRawPointer,
                                          _ width: Int32,
                                          _ height: Int32) {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    state.drawableSize = CGSize(width: Int(width), height: Int(height))
-    recomputeLayout(state)   // render resolution is derived here, from mode + display
+    let state = bridgeState(ref)
+    let size = CGSize(width: Int(width), height: Int(height))
+    guard size.width > 0, size.height > 0, size != state.drawableSize else { return }
+    state.drawableSize = size
+    reconfigure(state)
 }
 
-// MARK: - C ABI: per-frame render
-
-@_cdecl("crt_bridge_render")
-public func crt_bridge_render(_ ref: UnsafeMutableRawPointer,
-                              _ inputPtr: UnsafeMutableRawPointer,
-                              _ time: Float,
-                              _ cmdPtr: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer? {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    guard let input = object(inputPtr, as: MTLTexture.self) else {
-        NSLog("[CRTBridge] render: inputTexture is not an MTLTexture")
-        return nil
-    }
-    guard let cmd = object(cmdPtr, as: MTLCommandBuffer.self) else {
-        NSLog("[CRTBridge] render: commandBuffer is not an MTLCommandBuffer")
-        return nil
-    }
-    guard let out = state.filter.render(inputTexture: input, time: time,
-                                        commandBuffer: cmd) else {
-        return nil
-    }
-    // Borrowed: the engine owns/reuses this texture across frames.
-    return Unmanaged.passUnretained(out as AnyObject).toOpaque()
+/// The HOST panel's refresh (Hz). Not the emulated card's — see crt_bridge_set_signal.
+@_cdecl("crt_bridge_set_display_refresh")
+public func crt_bridge_set_display_refresh(_ ref: UnsafeMutableRawPointer,
+                                           _ hz: Float) {
+    let state = bridgeState(ref)
+    guard hz > 0 else { return }
+    state.displayRefreshHz = hz
+    state.filter.displayRefreshRate = hz
 }
+
+/// Report the PHYSICAL DISPLAY: `screenPtr` is an NSScreen* (or NULL for the main
+/// screen). Call at init AND on every event that changes the display — window moved to
+/// another screen, resolution or scaled-mode change, backing-scale change, EDR change.
+/// The host's only job is to notice and report; the engine decides what to do about it.
+@_cdecl("crt_bridge_update_display")
+public func crt_bridge_update_display(_ ref: UnsafeMutableRawPointer,
+                                      _ screenPtr: UnsafeMutableRawPointer?) {
+    let state = bridgeState(ref)
+    let screen: NSScreen? = screenPtr.map {
+        Unmanaged<NSScreen>.fromOpaque($0).takeUnretainedValue()
+    }
+    state.displayEnv.updateScreen(screen ?? NSScreen.main)
+    // Headroom is live state the engine reads directly; it is not part of the layout.
+    state.filter.displayHeadroom = Float(state.displayEnv.edrCurrent)
+
+    // Only the panel's REFRESH is a configuration fact (the drawable's size arrives by
+    // crt_bridge_set_drawable_size). So re-declare only when it moved. This matters:
+    // macOS posts a screen-parameters notification for every twitch of EDR headroom —
+    // a dozen a second while EDR settles — and the host rightly reports each one. Until
+    // the engine dropped its panel-PPI pitch model every report re-ran the layout here;
+    // nothing in the layout depends on the panel any more.
+    let hz = Float(state.displayEnv.info.maxRefreshRate)
+    if hz > 0, abs(hz - state.displayRefreshHz) > 0.01 {
+        state.displayRefreshHz = hz
+        reconfigure(state)
+    }
+}
+
+/// The panel's POTENTIAL EDR headroom (capability; 1.0 = SDR-only). The host decides
+/// the layer format from this. Using CURRENT here is the classic EDR chicken-and-egg —
+/// current reads 1.0 until EDR content is on screen, so the layer would never go EDR.
+/// The live CURRENT headroom is what clamps the highlight ceiling, re-read per frame
+/// in crt_bridge_present.
+@_cdecl("crt_bridge_edr_headroom")
+public func crt_bridge_edr_headroom(_ ref: UnsafeMutableRawPointer) -> Float {
+    Float(bridgeState(ref).displayEnv.edrPotential)
+}
+
+// MARK: - C ABI: the phosphor pattern
+
+/// Phosphor pattern: 0 triode, 1 stripe (aperture grille), 2 shadow mask, 3 slot mask;
+/// -1 = the preset's own. Ignored by the engine on a mono tube.
+@_cdecl("crt_bridge_set_phosphor_pattern")
+public func crt_bridge_set_phosphor_pattern(_ ref: UnsafeMutableRawPointer, _ pattern: Int32) {
+    let state = bridgeState(ref)
+    state.patternOverride = pattern < 0 ? nil : min(3, pattern)
+    reconfigure(state)
+}
+
+/// The pattern the engine is drawing (after the preset and the mono rule).
+@_cdecl("crt_bridge_get_phosphor_pattern")
+public func crt_bridge_get_phosphor_pattern(_ ref: UnsafeMutableRawPointer) -> Int32 {
+    let state = bridgeState(ref)
+    return state.layout?.colorPhosphorPattern
+        ?? state.patternOverride
+        ?? Int32(state.preset?.colorPhosphorPattern ?? 0)
+}
+
+// MARK: - C ABI: dials
+
+@_cdecl("crt_bridge_dial_count")
+public func crt_bridge_dial_count() -> Int32 {
+    Int32(Dial.allCases.count)
+}
+
+/// The dial's travel. False for an unknown dial.
+@_cdecl("crt_bridge_dial_range")
+public func crt_bridge_dial_range(_ dial: Int32,
+                                  _ lo: UnsafeMutablePointer<Float>?,
+                                  _ hi: UnsafeMutablePointer<Float>?) -> Bool {
+    guard let d = Dial(rawValue: dial) else { return false }
+    lo?.pointee = d.range.lowerBound
+    hi?.pointee = d.range.upperBound
+    return true
+}
+
+/// Where the dial is now: the user's position, or the preset's if untouched.
+@_cdecl("crt_bridge_get_dial")
+public func crt_bridge_get_dial(_ ref: UnsafeMutableRawPointer, _ dial: Int32) -> Float {
+    guard let d = Dial(rawValue: dial) else { return 0 }
+    return bridgeState(ref).value(d)
+}
+
+/// Where the live preset starts the dial — what a reset returns to.
+@_cdecl("crt_bridge_dial_default")
+public func crt_bridge_dial_default(_ ref: UnsafeMutableRawPointer, _ dial: Int32) -> Float {
+    guard let d = Dial(rawValue: dial) else { return 0 }
+    return bridgeState(ref).presetValue(d)
+}
+
+/// True when the user has moved the dial off the preset.
+@_cdecl("crt_bridge_dial_is_set")
+public func crt_bridge_dial_is_set(_ ref: UnsafeMutableRawPointer, _ dial: Int32) -> Bool {
+    bridgeState(ref).overrides[dial] != nil
+}
+
+/// Turn a dial. Clamped to its range; survives mode changes and preset switches.
+@_cdecl("crt_bridge_set_dial")
+public func crt_bridge_set_dial(_ ref: UnsafeMutableRawPointer, _ dial: Int32, _ v: Float) {
+    guard let d = Dial(rawValue: dial), v.isFinite else { return }
+    let state = bridgeState(ref)
+    state.overrides[dial] = clamp(v, d.range)
+    applyDial(state, d)
+}
+
+/// Put a dial back on the preset.
+@_cdecl("crt_bridge_reset_dial")
+public func crt_bridge_reset_dial(_ ref: UnsafeMutableRawPointer, _ dial: Int32) {
+    guard let d = Dial(rawValue: dial) else { return }
+    let state = bridgeState(ref)
+    guard state.overrides.removeValue(forKey: dial) != nil else { return }
+    applyDial(state, d)
+}
+
+// MARK: - C ABI: status
+
+/// One line saying what the tube is doing — the signal it is locked to, what the
+/// engine laid out for it, and the panel's headroom. For the host's options dialog:
+/// this is a diagnostic host, and the numbers that explain a picture should be
+/// readable without opening a log. Returns the UTF-8 length written (excluding NUL).
+@_cdecl("crt_bridge_describe")
+public func crt_bridge_describe(_ ref: UnsafeMutableRawPointer,
+                                _ buffer: UnsafeMutablePointer<CChar>?,
+                                _ capacity: Int32) -> Int32 {
+    guard let buffer = buffer, capacity > 1 else { return 0 }
+    let state = bridgeState(ref)
+    var text = "No picture yet"
+    if let l = state.layout {
+        let hz = state.filter.parameters.timing.crtRefreshRate
+        let rate = (state.signalRefreshHz > 0 || !(state.preset?.multiSync ?? false))
+            ? String(format: "%.2f Hz", hz)
+            : String(format: "%.2f Hz (preset — card reports none)", hz)
+        let pitch = Float(l.viewport.height) / Float(max(1, l.scanlineCount))
+        text = String(
+            format: "Signal %d×%d @ %@  ·  %d lines%@, %.2f px each  ·  buffer %d×%d  ·  picture %.0f×%.0f px  ·  headroom %.2f of %.2f",
+            state.contentSize.x, state.contentSize.y, rate,
+            l.scanlineCount, l.interlaced ? " interlaced" : "", pitch,
+            l.phosphorWidth, l.phosphorHeight,
+            Float(l.viewport.width), Float(l.viewport.height),
+            Float(state.displayEnv.edrCurrent), Float(state.displayEnv.edrPotential))
+    }
+    let utf8 = Array(text.utf8.prefix(Int(capacity) - 1))
+    utf8.withUnsafeBufferPointer { src in
+        buffer.withMemoryRebound(to: UInt8.self, capacity: utf8.count + 1) { dst in
+            if let base = src.baseAddress { dst.update(from: base, count: utf8.count) }
+            dst[utf8.count] = 0
+        }
+    }
+    return Int32(utf8.count)
+}
+
+// MARK: - C ABI: per-frame
 
 /// Run the CRT and put it on the host's drawable — the whole display tail, in the engine.
 ///
-/// This replaces "crt_bridge_render() then scale it yourself". The host must NOT hand-roll
-/// that last step: the phosphor buffer carries a 1px RGB mask and a scanline comb (content
-/// at Nyquist), so it has to be band-limited on the way out at EVERY scale ratio, and the
-/// engine's linear >1.0 output has to be encoded to match whatever the drawable actually
-/// is. Both are engine policy; see CRTEngine's DisplayCompositor.
+/// The host must NOT scale, encode or aspect-fit the picture itself: the scanline comb
+/// and the mask sit at the output grid's Nyquist, and the engine's linear >1.0 output
+/// has to be encoded to match whatever the drawable actually is (HostContract §4, §5).
 ///
 /// `sdrEncoded` describes the DRAWABLE, and only the host knows it:
-///   false → extended-linear float drawable (rgba16Float + extendedLinear*): write linear,
-///           let the OS tonemap above-white against the panel's real EDR headroom.
-///   true  → 8-bit gamma drawable (bgra8Unorm + DisplayP3/sRGB): soft-clip the above-white
-///           peaks and apply the BT.709 OETF. Writing linear here reads DARK.
-/// Get this wrong and no brightness/contrast setting can rescue the picture.
+///   false → extended-linear float drawable (rgba16Float + extendedLinear*). The display
+///           pass draws STRAIGHT INTO the drawable, in the engine's own viewport: it
+///           already renders at output resolution with the mask and the comb integrated
+///           over the pixel, so there is nothing left to band-limit and no intermediate
+///           surface to write and re-read.
+///   true  → 8-bit gamma drawable (bgra8Unorm + DisplayP3/sRGB). The display pass
+///           renders to a viewport-sized float surface and DisplayCompositor soft-clips
+///           the above-white peaks and applies the BT.709 OETF. Writing linear here
+///           reads DARK, and no brightness or contrast setting can rescue it.
 ///
-/// The picture is placed using the ENGINE's viewport (aspect-preserving, pillar/letterboxed),
-/// so the host does not compute an aspect fit either.
+/// The picture is placed in the ENGINE's viewport (aspect-preserving), so the host does
+/// not compute an aspect fit either.
 @_cdecl("crt_bridge_present")
 public func crt_bridge_present(_ ref: UnsafeMutableRawPointer,
                                _ inputPtr: UnsafeMutableRawPointer,
@@ -830,14 +772,39 @@ public func crt_bridge_present(_ ref: UnsafeMutableRawPointer,
                                _ targetPtr: UnsafeMutableRawPointer,
                                _ cmdPtr: UnsafeMutableRawPointer,
                                _ sdrEncoded: Bool) -> Bool {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
+    let state = bridgeState(ref)
     guard let input = object(inputPtr, as: MTLTexture.self),
           let target = object(targetPtr, as: MTLTexture.self),
           let cmd = object(cmdPtr, as: MTLCommandBuffer.self) else {
         NSLog("[CRTBridge] present: bad input/target/commandBuffer")
         return false
     }
+    guard state.layout != nil else { return false }
 
+    // Advance the tube one field. `simulate`, not `render`: this host draws its own
+    // display surface below, and `render` would also draw a display pass at the
+    // phosphor buffer's resolution only to have it thrown away.
+    guard state.filter.simulate(inputTexture: input, time: time, commandBuffer: cmd) else {
+        return false
+    }
+
+    // Highlight ceiling: the tube's peaks get the panel's LIVE headroom, up to the
+    // user's allowance; on an SDR panel this is exactly the SDR curve. The headroom is
+    // live state (it rises when the system engages EDR for our layer and moves with
+    // display brightness), so it is re-read every frame.
+    state.displayEnv.refreshEDR()
+    let ceiling = min(max(1.0, state.filter.parameters.display.peakAllowance),
+                      max(1.0, Float(state.displayEnv.edrCurrent)))
+
+    // The engine's own whole-pixel aspect fit, mirrored from the layout by configure.
+    let viewport = state.filter.scalingManager.viewport
+
+    if !sdrEncoded && target.pixelFormat == .rgba16Float {
+        return state.filter.renderDisplay(to: target, viewport: viewport,
+                                          commandBuffer: cmd, highlightCeiling: ceiling)
+    }
+
+    // ---- 8-bit drawable: surface + compositor (the SDR encode) ----
     let transfer: PipelineFactory.DisplayTransfer = sdrEncoded ? .sdrEncoded : .linear
     if state.compositor == nil
         || state.compositor?.colorPixelFormat != target.pixelFormat
@@ -853,16 +820,7 @@ public func crt_bridge_present(_ ref: UnsafeMutableRawPointer,
     }
     guard let compositor = state.compositor else { return false }
 
-    // Run the phosphor simulation for this frame. Its phosphor-buffer display output is
-    // unused — we re-render the display at OUTPUT resolution below (the CRTEngine 1.4.0
-    // surface-mask path), so the RGB mask is evaluated at on-screen pixels and stays sharp
-    // at any window size instead of being baked into the phosphor buffer and upscaled.
-    _ = state.filter.render(inputTexture: input, time: time, commandBuffer: cmd)
-
-    // (Re)allocate the viewport-sized display surface, then render the mask + display tail
-    // into it at that resolution.
-    let vp = state.scaling.viewport
-    let vw = Int(vp.width.rounded()), vh = Int(vp.height.rounded())
+    let vw = Int(viewport.width.rounded()), vh = Int(viewport.height.rounded())
     guard vw > 1, vh > 1 else { return false }
     if state.displaySurface == nil
         || state.displaySurface?.width != vw
@@ -874,61 +832,14 @@ public func crt_bridge_present(_ ref: UnsafeMutableRawPointer,
         state.displaySurface = state.device.makeTexture(descriptor: desc)
         state.displaySurface?.label = "CRTBridge_DisplaySurface"
     }
-    // Display-pass highlight ceiling: peaks get the panel's LIVE headroom up to
-    // the user's allowance; on an SDR panel this is exactly the SDR curve.
-    // Re-read the headroom every frame — it's live state (rises when the system
-    // engages EDR for our layer, moves with display brightness).
-    state.displayEnv.refreshEDR()
-    let ceiling = min(max(1.0, state.filter.parameters.display.peakAllowance),
-                      max(1.0, Float(state.displayEnv.edrCurrent)))
     guard let surface = state.displaySurface,
           state.filter.renderDisplay(to: surface, commandBuffer: cmd,
                                      highlightCeiling: ceiling) != nil else {
         return false
     }
-
-    // The compositor now runs 1:1 (surface is already viewport-sized): it just places the
-    // picture with the engine's aspect-preserving viewport and applies the drawable's transfer.
-    compositor.composite(crtOutput: surface,
-                         to: target,
-                         viewport: state.scaling.viewport,
+    // The surface is already viewport-sized, so the compositor runs 1:1: it places the
+    // picture and applies the drawable's transfer.
+    compositor.composite(crtOutput: surface, to: target, viewport: viewport,
                          commandBuffer: cmd)
     return true
-}
-
-/// Run the phosphor simulation and render the CRT directly into `targetPtr`
-/// (an id<MTLTexture>) at the target's own resolution, using the engine's display
-/// shader (its derivative-aware downscale + target-sized mask LOD). The host
-/// presents the target 1:1 — no host-side scaling of the phosphor, so no resample
-/// artifacts. `target` should be 4:3 to match the CRT. Returns false on failure.
-@_cdecl("crt_bridge_render_display")
-public func crt_bridge_render_display(_ ref: UnsafeMutableRawPointer,
-                                      _ inputPtr: UnsafeMutableRawPointer,
-                                      _ time: Float,
-                                      _ cmdPtr: UnsafeMutableRawPointer,
-                                      _ targetPtr: UnsafeMutableRawPointer) -> Bool {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    guard let input  = object(inputPtr,  as: MTLTexture.self),
-          let cmd    = object(cmdPtr,    as: MTLCommandBuffer.self),
-          let target = object(targetPtr, as: MTLTexture.self) else {
-        NSLog("[CRTBridge] render_display: bad texture/command-buffer pointer")
-        return false
-    }
-    // Run the phosphor sim for this frame (its phosphor-res display output is
-    // unused), then render the display shader into the caller's target.
-    _ = state.filter.render(inputTexture: input, time: time, commandBuffer: cmd)
-    state.filter.renderDisplay(to: target, commandBuffer: cmd)
-    return true
-}
-
-@_cdecl("crt_bridge_resize")
-public func crt_bridge_resize(_ ref: UnsafeMutableRawPointer,
-                              _ width: Int32, _ height: Int32) {
-    let state = Unmanaged<CRTBridgeState>.fromOpaque(ref).takeUnretainedValue()
-    state.filter.resize(width: Int(width), height: Int(height))
-}
-
-@_cdecl("crt_bridge_destroy")
-public func crt_bridge_destroy(_ ref: UnsafeMutableRawPointer) {
-    Unmanaged<CRTBridgeState>.fromOpaque(ref).release()
 }

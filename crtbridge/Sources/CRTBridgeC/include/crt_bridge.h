@@ -1,18 +1,20 @@
 // crt_bridge.h — flat C ABI surface for CRTEngine.
 //
-// This is the contract a C/C++/Obj-C++ host (e.g. an 86Box Qt renderer) compiles
+// This is the contract a C/C++/Obj-C++ host (the 86Box Qt Metal renderer) compiles
 // against. The implementation lives in the Swift target `CRTBridgeC` as @_cdecl
 // functions; symbols resolve at link time against libCRTBridgeC.dylib. Metal
 // objects cross the boundary as opaque `void *` — on the host side they are
 // `id<MTL...>` passed with `(__bridge void *)`, on the Swift side they are
 // recovered via Unmanaged.
 //
-// One creation/preset family, loading resources via Bundle.module:
-// crt_bridge_create / crt_bridge_apply_preset / crt_bridge_set_preset. 86Box's
-// CMake build (crtbridge/CMakeLists.txt + build.sh) bundles CRTEngine's resource
-// bundle (with a compiled default.metallib) straight into the .app so this path
-// works unmodified for a CMake/.app host too — there is no separate
-// explicit-path loading entry point.
+// The division of labour (CRTEngine docs/HostContract.md): the host REPORTS facts —
+// the signal its card is sending, the drawable, the physical display — and DECLARES
+// what the user chose — the preset, the pattern, the dial positions. The engine
+// decides everything about rendering. So this header has no layout, buffer-size or
+// render-resolution entry points: those are not the host's to set.
+//
+// Resources load via Bundle.module: 86Box's CMake build (crtbridge/build.sh) bundles
+// CRTEngine's resource bundle, with a compiled default.metallib, into the .app.
 #ifndef CRT_BRIDGE_H
 #define CRT_BRIDGE_H
 
@@ -22,30 +24,40 @@
 extern "C" {
 #endif
 
-// Opaque handle to a live CRT filter + scaling state.
+// Opaque handle to a live CRT.
 typedef void *CRTBridgeRef;
 
 // --- Creation -------------------------------------------------------------
 
-// Create the engine. `device` is an id<MTLDevice>. phosphorW/H is the internal
-// phosphor-buffer (render) resolution. Returns NULL on failure. Shaders + presets
-// load from CRTEngine's own resource bundle (Bundle.module), which the app bundles
-// into Contents/Resources so the engine stays unmodified.
-CRTBridgeRef crt_bridge_create(void *device, int phosphorW, int phosphorH);
+// Create the engine. `device` is an id<MTLDevice>; drawableW/H is the drawable the
+// picture will be presented into, in device pixels (correct it later with
+// crt_bridge_set_drawable_size). Returns NULL on failure. Nothing is drawn until a
+// preset is set.
+CRTBridgeRef crt_bridge_create(void *device, int drawableW, int drawableH);
 
-// --- Preset selection -----------------------------------------------------
+// Release the engine.
+void crt_bridge_destroy(CRTBridgeRef ref);
 
-// Configure for a named preset (e.g. "VGA monitor", "NTSC color"), loading the
-// preset list via Bundle.module. contentW/H = the emulated source resolution.
-// Returns false if the preset name is unknown or the bundle is missing.
-bool crt_bridge_apply_preset(CRTBridgeRef ref, const char *presetName,
-                             int contentW, int contentH);
+// --- Presets --------------------------------------------------------------
 
-// --- Dynamic state --------------------------------------------------------
+// The engine's bundled presets, in the engine's order. The host lists THESE instead
+// of keeping its own table of names — a host-side table goes stale the day the engine
+// renames or adds one. Names are valid for the life of the process; NULL past the end.
+int         crt_bridge_preset_count(void);
+const char *crt_bridge_preset_name(int index);
 
-// Re-apply the current preset at a new emulated resolution. Call when 86Box
-// switches video mode (mon_xsize/mon_ysize change). Prefer crt_bridge_set_signal.
-void crt_bridge_set_content_size(CRTBridgeRef ref, int contentW, int contentH);
+// Switch the tube (e.g. "VGA monitor", "NTSC color"). The user's dial positions are
+// kept and re-applied over the new preset's starting positions. Returns false if the
+// name is unknown or the resource bundle is missing.
+bool crt_bridge_set_preset(CRTBridgeRef ref, const char *presetName);
+
+// Index of the live preset in the list above, or -1 before one is set.
+int  crt_bridge_current_preset(CRTBridgeRef ref);
+
+// True when the live tube is a colour tube (it has a phosphor pattern to choose).
+bool crt_bridge_is_color(CRTBridgeRef ref);
+
+// --- The signal and the display -------------------------------------------
 
 // THE SIGNAL ON THE WIRE. What the emulated video card is sending: active
 // resolution + its TRUE vertical refresh, straight from the CRTC
@@ -54,11 +66,14 @@ void crt_bridge_set_content_size(CRTBridgeRef ref, int contentW, int contentH);
 // One-way, like the real VGA cable: the card pushes, the tube reacts, nothing comes
 // back. Resolution and refresh travel together because a mode change alters both at
 // once. refreshHz = 0 means "this card doesn't report timings" (CGA/MDA/EGA today) —
-// the bridge falls back to the VGA standards table.
+// the preset's rate then stands in.
 //
 // NOTE: this is the EMULATED CARD's refresh, not the host monitor's. For the latter
 // see crt_bridge_set_display_refresh — they are different concepts, do not conflate.
 void crt_bridge_set_signal(CRTBridgeRef ref, int activeW, int activeH, float refreshHz);
+
+// The drawable the picture is presented into (the on-screen widget, device pixels).
+void crt_bridge_set_drawable_size(CRTBridgeRef ref, int width, int height);
 
 // Set the HOST display's refresh rate (Hz) for correct field cadence. This is the
 // physical panel 86Box's window is on — NOT the emulated card's signal refresh.
@@ -66,7 +81,7 @@ void crt_bridge_set_display_refresh(CRTBridgeRef ref, float hz);
 
 // Detect host display capabilities (EDR headroom, refresh, scale) from an
 // NSScreen* (or NULL for the main screen) and push them into the engine. Call
-// at init and on screen changes. Feeds the engine's LIVE headroom (peak ceiling).
+// at init and on every display change.
 void crt_bridge_update_display(CRTBridgeRef ref, void *nsScreen);
 
 // The display's POTENTIAL EDR headroom (capability; 1.0 = SDR-only panel). The host
@@ -76,61 +91,89 @@ void crt_bridge_update_display(CRTBridgeRef ref, void *nsScreen);
 // the layer on it would keep EDR permanently off — the chicken-and-egg).
 float crt_bridge_edr_headroom(CRTBridgeRef ref);
 
-// Set the fixed phosphor render width (px); higher = finer stripes/mask, more
-// GPU. 0 (default; not currently called by 86Box) = the engine picks per its
-// own D2 policy — content width clamped to [1440, 5760]
-// (ScalingManager.autoDisplayRenderWidth), not a fixed number.
-void crt_bridge_set_render_resolution(CRTBridgeRef ref, int width);
+// --- The phosphor pattern --------------------------------------------------
 
-// Pattern Scale: a multiplier of the tube's PHYSICAL phosphor pitch (tube size ×
-// phosphorPitchMM from the preset — NOT a panel-PPI or "algorithmic finest pitch"
-// lookup). 1.0 = the real pitch; higher coarsens the grille so it reads at
-// smaller window sizes. Clamped [1,10]. Seeded from CRT_MASK_SCALE.
-void crt_bridge_set_mask_scale(CRTBridgeRef ref, float scale);
-
-// Peak highlights (replaces HDR on/off + boost): how far the tube's >1.0 peaks
-// (mask sparkle, small-area highlights) may render above reference white. Always
-// capped by the panel's LIVE headroom; the picture body is identity on every
-// panel, so this can never blow out the image. 1.0 = SDR look everywhere.
-void crt_bridge_set_peak_highlights(CRTBridgeRef ref, float v);   // 1.0 .. 16.0 (live-clamped by panel)
-
-// Switch CRT preset at runtime (at the current content size, keeping user overrides).
-// e.g. "VGA monitor", "NTSC color", "Green CRT monitor". Returns false if unknown.
-bool crt_bridge_set_preset(CRTBridgeRef ref, const char *presetName);
-
-// --- Picture + phosphor pattern + monitor conditions (live, for an options UI) ---
-void crt_bridge_set_brightness(CRTBridgeRef ref, float v);        // -0.4 .. +0.5
-void crt_bridge_set_contrast(CRTBridgeRef ref, float v);          // 0.1 .. 3.0
-// Phosphor pattern: 0=triode, 1=stripe (aperture grille), 2=shadow mask, 3=slot.
+// 0 = triode, 1 = stripe (aperture grille), 2 = shadow mask, 3 = slot mask;
+// -1 = the preset's own. Ignored by the engine on a mono tube.
 void crt_bridge_set_phosphor_pattern(CRTBridgeRef ref, int pattern);
-// Beam controls.
-void crt_bridge_set_sharpness(CRTBridgeRef ref, float s);         // 0=soft .. 1=sharp
-void crt_bridge_set_edge_focus(CRTBridgeRef ref, float v);        // 0..1
-void crt_bridge_set_bloom(CRTBridgeRef ref, float v);            // 0..~0.5
-void crt_bridge_set_convergence(CRTBridgeRef ref, float v);       // px, 0..~1
-// Monitor conditions.
-void crt_bridge_set_h_jitter(CRTBridgeRef ref, float v);          // px, 0..~3
-void crt_bridge_set_v_jitter(CRTBridgeRef ref, float v);          // scanlines, 0..~2
-void crt_bridge_set_shot_noise(CRTBridgeRef ref, float v);        // 0..~0.05
-void crt_bridge_set_h_bandwidth(CRTBridgeRef ref, float v);       // RC rolloff β 0..1.0 (lower = sharper, more ring; 0 = ringless legacy Gaussian, no anti-beat protection)
-void crt_bridge_set_h_focus(CRTBridgeRef ref, float v);           // optical H blur σ 0..3 source px (0 = focused)
-void crt_bridge_set_beam_segment(CRTBridgeRef ref, float v);      // beam temporal resolution 0..1: 1 = whole line at one instant (legacy, zero flicker), smaller = segmented dot (real sweep-time structure, flicker as the dial approaches a dot)
-void crt_bridge_set_shutter(CRTBridgeRef ref, float v);          // observer integration 0..1: 1 = fused eye (steady), lower = camera shutter (rolling band / flicker)
-void crt_bridge_set_signal_noise(CRTBridgeRef ref, float v);      // 0..~0.15
+// The pattern the engine is drawing (after the preset and the mono rule).
+int  crt_bridge_get_phosphor_pattern(CRTBridgeRef ref);
 
-// Lay the screen out for a given drawable size (the on-screen widget size).
-void crt_bridge_set_drawable_size(CRTBridgeRef ref, int width, int height);
+// --- Dials ------------------------------------------------------------------
+//
+// Every continuous user control is one of these. For each the bridge knows the range
+// (the ENGINE's own, wherever the engine publishes one), where the live preset starts
+// it, and where it is now — so a host's slider never restates a range or a default,
+// and opens showing the truth. Labels, grouping and units are the host's business.
+//
+// Order must match `Dial` in CRTBridge.swift; crt_bridge_dial_count() lets the host
+// check that it does.
+typedef enum {
+    // Picture
+    CRT_DIAL_BRIGHTNESS = 0,   // master bias (DC offset); 0 = neutral
+    CRT_DIAL_CONTRAST,         // master video gain
+    CRT_DIAL_SATURATION,       // colour saturation; 1 = as sent
+    CRT_DIAL_PEAK_HIGHLIGHTS,  // how far the tube's peaks may rise above reference white
+                               //   (1 = SDR look); always capped by the panel's LIVE headroom
+    // Phosphor pattern (colour tubes with a pattern other than triode)
+    CRT_DIAL_PATTERN_SCALE,    // triad size in OUTPUT pixels; under ~3 the pattern merges to flat
+    CRT_DIAL_PATTERN_FOCUS,    // 0 = softest/faintest .. 1 = tightest/purest; the engine derives
+                               //   what that means per pattern
+    // Glass and geometry
+    CRT_DIAL_CURVATURE,        // faceplate curvature: 0 = flat, 1 = this tube's own radius, >1 exaggerated
+    CRT_DIAL_HALATION,         // light returned by the glass (the broad halo); 0 = none
+    CRT_DIAL_SCATTER,          // etched-face haze (the local glow); 0 = polished
+    CRT_DIAL_OVERSCAN,         // raster size against the glass, fraction per side:
+                               //   + overscan, 0 exact fit, - underscan
+    CRT_DIAL_VIGNETTE,         // brightness falloff toward the edges
+    // Beam
+    CRT_DIAL_SHARPNESS,        // 0 = soft (beam fills the scanline cell) .. 1 = sharp
+    CRT_DIAL_H_BANDWIDTH,      // video bandwidth, RC rolloff: lower = crisper (more ringing);
+                               //   0 = ringless Gaussian spot, no anti-beat protection
+    CRT_DIAL_H_FOCUS,          // bipolar focus pot, source px: 0 = focused, either way blurs
+    CRT_DIAL_SHUTTER,          // observer: 1 = fused eye (steady) .. 0 = fast camera shutter
+    CRT_DIAL_EDGE_FOCUS,       // focus lost toward the screen edges
+    CRT_DIAL_BLOOM,            // beam widening with brightness
+    CRT_DIAL_CONVERGENCE,      // bipolar: 0 = converged; sign = fringing direction
+    // Signal and wear
+    CRT_DIAL_H_JITTER,         // per-scanline horizontal shift
+    CRT_DIAL_V_JITTER,         // per-frame vertical bounce, scanlines
+    CRT_DIAL_SHOT_NOISE,       // per-pixel beam shot noise
+    CRT_DIAL_SIGNAL_NOISE,     // additive snow
+    CRT_DIAL_COUNT
+} CRTDial;
+
+// Number of dials the bridge implements. Must equal CRT_DIAL_COUNT.
+int   crt_bridge_dial_count(void);
+// The dial's travel. Returns false for an unknown dial.
+bool  crt_bridge_dial_range(int dial, float *lo, float *hi);
+// Where the dial is now: the user's position, or the preset's if untouched.
+float crt_bridge_get_dial(CRTBridgeRef ref, int dial);
+// Where the live preset starts the dial — what crt_bridge_reset_dial returns to.
+float crt_bridge_dial_default(CRTBridgeRef ref, int dial);
+// True when the user has moved the dial off the preset.
+bool  crt_bridge_dial_is_set(CRTBridgeRef ref, int dial);
+// Turn a dial (clamped to its range). Survives mode changes and preset switches.
+void  crt_bridge_set_dial(CRTBridgeRef ref, int dial, float v);
+// Put a dial back on the preset.
+void  crt_bridge_reset_dial(CRTBridgeRef ref, int dial);
+
+// --- Status -----------------------------------------------------------------
+
+// One line saying what the tube is doing: the signal it is locked to, the lines and
+// buffer the engine laid out for it, the picture's size on the panel and the panel's
+// headroom. Writes NUL-terminated UTF-8 into `buffer`; returns the length written.
+int crt_bridge_describe(CRTBridgeRef ref, char *buffer, int capacity);
 
 // --- Per-frame ------------------------------------------------------------
 
-// PRESENT ONE FRAME — run the CRT and put it on the drawable. This is the call a
-// display host wants: the engine owns the whole display tail.
+// PRESENT ONE FRAME — run the CRT and put it on the drawable. The engine owns the
+// whole display tail: the host must not scale, encode or aspect-fit the picture.
 //
-// Do NOT use crt_bridge_render() and scale the result yourself. The phosphor buffer
-// holds a 1px RGB mask and a scanline comb — content at Nyquist — so it must be
-// band-limited on the way out at EVERY scale ratio (point-sampling it because you
-// happen to be magnifying will alias, in triode too), and the engine's linear,
-// above-1.0 output must be encoded to match the drawable. Both are engine policy.
+// `inputTexture` is the emulated frame, gamma-encoded as it left the card (a raw
+// BGRA8 framebuffer is already right — do not linearise it). `time` is a monotonic
+// seconds clock driving the beam sweep and phosphor decay. `target` is the drawable's
+// id<MTLTexture>, `commandBuffer` an id<MTLCommandBuffer>.
 //
 // `sdrEncoded` describes the DRAWABLE — only the host knows this:
 //   false = extended-linear float (rgba16Float + extendedLinear*) — engine writes
@@ -140,31 +183,10 @@ void crt_bridge_set_drawable_size(CRTBridgeRef ref, int width, int height);
 // Writing linear into a gamma-encoded drawable reads DARK, and no brightness or
 // contrast setting can correct it — it is a transfer-function mismatch.
 //
-// The picture is placed with the ENGINE's aspect-preserving viewport, so the host
-// does not compute an aspect fit either. Returns false on failure.
+// The picture is placed with the ENGINE's aspect-preserving viewport. Returns false
+// on failure (the host then falls back to its raw feed).
 bool crt_bridge_present(CRTBridgeRef ref, void *inputTexture, float time,
                         void *target, void *commandBuffer, bool sdrEncoded);
-
-// Render one frame. `inputTexture` and `commandBuffer` are id<MTLTexture> /
-// id<MTLCommandBuffer>. `time` is a monotonic seconds clock driving beam sweep
-// and phosphor decay. Returns the simulated output as id<MTLTexture> (borrowed,
-// owned by the engine, valid until the next render) or NULL.
-// LOW-LEVEL: prefer crt_bridge_present, which also does the display tail correctly.
-void *crt_bridge_render(CRTBridgeRef ref, void *inputTexture, float time,
-                        void *commandBuffer);
-
-// Run the sim and render the CRT directly into `target` (an id<MTLTexture>) at the
-// target's own resolution, using the engine's display shader (its own downscale +
-// mask LOD). The host presents `target` 1:1 — no host scaling of the phosphor, so
-// no resample moiré. `target` should be 4:3. Returns false on failure.
-bool crt_bridge_render_display(CRTBridgeRef ref, void *inputTexture, float time,
-                               void *commandBuffer, void *target);
-
-// Resize the phosphor/output buffers.
-void crt_bridge_resize(CRTBridgeRef ref, int width, int height);
-
-// Release the engine.
-void crt_bridge_destroy(CRTBridgeRef ref);
 
 #ifdef __cplusplus
 }

@@ -2628,7 +2628,14 @@ void
 MainWindow::on_actionRenderer_options_triggered()
 {
     if (const auto dlg = ui->stackedWidget->getOptions(this)) {
-        if (dlg->exec() == QDialog::Accepted) {
+        // The Metal (CRT) options are live picture adjustments, like the CGA composite
+        // settings below: the emulator must keep running while the dialog is open, or
+        // nothing is drawn and a dial only shows its effect once the dialog closes.
+        // (A modal dialog otherwise pauses emulation — see the WindowBlocked filter.)
+        isNonPause      = (vid_api == RENDERER_METAL);
+        const int result = dlg->exec();
+        isNonPause      = false;
+        if (result == QDialog::Accepted) {
             if (ui->stackedWidget->reloadRendererOption()) {
                 ui->stackedWidget->switchRenderer(static_cast<RendererStack::Renderer>(vid_api));
                 if (show_second_monitors) {

@@ -17,6 +17,7 @@
 #define QT_METAL_PRESENTER_H
 
 #include <cstdint>
+#include <string>
 
 class MetalPresenter {
 public:
@@ -32,14 +33,13 @@ public:
     bool valid() const;
 
     /* Turn on the CRTEngine phosphor simulation: present() will route the
-       framebuffer through the engine instead of straight to screen. Loads the
-       given preset (e.g. "VGA monitor") at the initial emulated resolution.
+       framebuffer through the engine instead of straight to screen. Comes up on the
+       preset the user last chose, or `presetName` (e.g. "VGA monitor") if none, with
+       their saved dial positions applied. contentW/H seed the emulated resolution; the
+       real signal is pushed with the first frame.
        No-op (returns false) in stub builds without USE_CRTENGINE. */
     bool enableCRT(const char *presetName, int contentW, int contentH);
     bool crtEnabled() const;
-
-    /* Tell the engine the emulated resolution changed (86Box mode switch). */
-    void setContentSize(int contentW, int contentH);
 
     /* The EMULATED CARD's true vertical refresh (Hz), from its CRTC — the rate the
        simulated tube locks to. Pushed with the resolution on a mode change.
@@ -56,31 +56,36 @@ public:
        Call at init and on screen changes. No-op without USE_CRTENGINE. */
     void updateDisplay(void *nsScreen);
 
-    /* Live monitor adjustments (for the renderer options UI). No-op in stub. */
-    void setBrightness(float v);
-    void setContrast(float v);
-    void setPhosphorPattern(int pattern);   /* 0=triode 1=stripe 2=shadow 3=slot */
-    void setSharpness(float v);             /* 0=soft .. 1=sharp */
-    void setEdgeFocus(float v);
-    void setBloom(float v);
-    void setConvergence(float v);
-    void setHJitter(float v);
-    void setVJitter(float v);
-    void setShotNoise(float v);
-    void setSignalNoise(float v);
-    void setHBandwidth(float v);            /* RC rolloff β 0.2..1.0 (lower = sharper) */
-    void setHFocus(float v);                /* optical H blur σ 0..3 source px */
-    void setBeamSegment(float v);           /* beam temporal resolution 0..1 (1 = whole line, <1 = segmented dot) */
-    void setShutter(float v);               /* observer integration 0..1 (1 = fused eye, <1 = camera shutter) */
-    void setMaskScale(float v);             /* RGB mask 1x/2x/3x (multiplier of finest) */
-    void setPeakHighlights(float v);        /* tube peak headroom 1.0 (SDR look) .. 3.0, capped by live panel headroom */
-    void setPreset(int idx);                /* CRT preset by index (see kCrtPresetNames) */
+    /* ---- CRT options (for the renderer options dialog) ----------------------------
+       Everything the dialog shows comes from the engine through these: the preset
+       list, each dial's range, where the live preset starts it and where it is now.
+       The dialog therefore holds no ranges, no defaults and no preset names of its
+       own. Setters apply to the live engine AND persist (NSUserDefaults); a dial is
+       persisted only once the user moves it, and resetting forgets it again.
+       `dial` is a CRTDial from crt_bridge.h. All inert in stub builds. */
+    int         presetCount() const;
+    const char *presetName(int index) const;   /* the engine's name; NULL past the end */
+    int         currentPreset() const;         /* index, or -1 */
+    void        setPreset(int index);
+    bool        isColor() const;               /* the live tube has a phosphor pattern */
 
-    /* Persistence (NSUserDefaults). loadSettings() applies any saved user
-       adjustments over the preset — call once after enableCRT. persistedValue()
-       lets the options dialog initialize its controls to the saved state. */
-    void  loadSettings();
-    float persistedValue(const char *key, float fallback) const;
+    int  phosphorPattern() const;              /* 0=triode 1=stripe 2=shadow 3=slot, as drawn */
+    void setPhosphorPattern(int pattern);
+
+    bool  dialRange(int dial, float *lo, float *hi) const;
+    float dial(int dial) const;                /* the user's position, or the preset's */
+    float dialDefault(int dial) const;         /* where the live preset starts it */
+    bool  dialIsSet(int dial) const;           /* moved off the preset by the user */
+    void  setDial(int dial, float v);
+    void  resetDial(int dial);                 /* back to the preset */
+    void  resetAll();                          /* every dial and the pattern */
+
+    /* One line: the signal the tube is locked to, what the engine laid out for it,
+       and the panel's headroom. Empty in stub builds. */
+    std::string status() const;
+
+    /* Apply the persisted user adjustments over the preset. enableCRT calls it. */
+    void loadSettings();
 
     /* Set the layer's contentsScale (backing scale factor, e.g. 2.0 on Retina).
        MUST match drawableSize / bounds or Core Animation resamples the whole

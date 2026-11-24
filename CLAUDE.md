@@ -68,6 +68,12 @@ wiped build tree changes which dylib loads.
   .../mpg123/<old>/include`. Check `pkg-config --cflags sndfile` first — if it
   resolves clean, the disk is fine. Fix: `rm build/macmetal/CMakeCache.txt`.
   Do NOT `brew reinstall` to chase it.
+- **Every `_fluid_*` symbol undefined at the final link.** fluid-synth 2.6.2's
+  `fluidsynth.pc` requires `readline`, and Homebrew's readline is keg-only, so
+  pkg-config cannot resolve fluidsynth; CMake still reports it found, with
+  empty link flags. `build-macos-metal.sh` now exports readline's pkgconfig
+  dir. If it recurs with another keg-only dependency, run
+  `pkg-config --libs fluidsynth` and read what it cannot find.
 - **`crtbundle` never cleans.** It copies into `Contents/Frameworks` and
   `Contents/Resources` and removes nothing, so anything hand-dropped there
   (e.g. a `libCRTBridgeC.dylib.bak-*`) persists into every future build and

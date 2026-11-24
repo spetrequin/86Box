@@ -18,17 +18,29 @@
 #include <QTimerEvent>
 #include <QScreen>
 #include <QDialog>
-#include <QFormLayout>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QGridLayout>
+#include <QTabWidget>
 #include <QSlider>
 #include <QComboBox>
-#include <QCheckBox>
 #include <QLabel>
+#include <QToolButton>
+#include <QPushButton>
 #include <QDialogButtonBox>
+#include <QSignalBlocker>
+#include <QTimer>
 #include <algorithm>
 #include <cmath>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include <cstdio>
-#include <functional>
+
+#ifdef USE_CRTENGINE
+#    include "crt_bridge.h"   // CRTDial — the dial identifiers; nothing else is called from here
+#endif
 
 extern "C" {
 #include <86box/video.h>
@@ -147,6 +159,26 @@ MetalRenderer::updateDrawableSize()
 static void
 logDisplay(NSScreen *s, double scale)
 {
+    // Log a display when it CHANGES, not every time it is reported. The current EDR
+    // headroom drifts continuously and each drift is a report (see reportDisplay), so an
+    // unfiltered log is mostly this one line; a quarter-stop of headroom is the smallest
+    // move worth a line.
+    static std::string lastName;       // (not an NSString: these files build without ARC)
+    static NSRect      lastFrame;
+    static double    lastScale = 0.0, lastNow = -1.0, lastPotential = -1.0;
+    const double now       = s.maximumExtendedDynamicRangeColorComponentValue;
+    const double potential = s.maximumPotentialExtendedDynamicRangeColorComponentValue;
+    const std::string name = s.localizedName.UTF8String ?: "";
+    if (lastNow >= 0.0 && lastName == name
+        && NSEqualRects(lastFrame, s.frame) && lastScale == scale
+        && lastPotential == potential && std::fabs(now - lastNow) < 0.25)
+        return;
+    lastName      = name;
+    lastFrame     = s.frame;
+    lastScale     = scale;
+    lastNow       = now;
+    lastPotential = potential;
+
     const char *home = getenv("HOME");
     if (home == nullptr)
         return;
@@ -325,109 +357,308 @@ MetalRenderer::hasOptions() const
     return presenter && presenter->crtEnabled();
 }
 
-// A labeled horizontal slider mapping an integer track to a float range. The
-// signal is connected AFTER the initial value is set, so merely opening the
-// dialog doesn't perturb the engine's current settings.
-static void
-addSlider(QFormLayout *form, const QString &label, double lo, double hi,
-          double init, std::function<void(float)> setter)
-{
-    auto *s = new QSlider(Qt::Horizontal);
-    s->setRange(0, 1000);
-    s->setValue(int((init - lo) / (hi - lo) * 1000.0));
-    QObject::connect(s, &QSlider::valueChanged, [=](int v) {
-        setter(float(lo + (hi - lo) * (double) v / 1000.0));
-    });
-    form->addRow(label, s);
-}
+/* ---- CRT Monitor Options ----------------------------------------------------------
+   The dialog is a VIEW of the engine, not a second copy of it. Preset names, each
+   dial's range, where the live preset starts a dial and where it sits now are all read
+   from CRTEngine through the presenter; what lives here is only what a host owns —
+   labels, grouping, units and help text. So a slider cannot open on a guessed default
+   or offer a range the engine would clamp, and the engine adding a preset needs no
+   edit here. Changes apply live and persist; closing the dialog is not a commit. */
+#ifdef USE_CRTENGINE
+namespace {
 
-static void
-addSection(QFormLayout *form, const QString &title)
-{
-    auto *l = new QLabel(QStringLiteral("<b>%1</b>").arg(title));
-    l->setContentsMargins(0, 8, 0, 2);
-    form->addRow(l);
-}
+/* What the host decides about a dial: its name, how its value reads, and when it means
+   anything. Which dial, its range and its values are the engine's. */
+struct DialSpec {
+    enum Needs { Always, Color, Pattern };   // Pattern = a colour tube showing a mask
+    int         dial;
+    QString     label;
+    const char *format;    // printf format for (value * scale)
+    double      scale;     // display multiplier (100 for a fraction shown as percent)
+    Needs       needs;
+    QString     help;
+};
+
+struct DialRow {
+    DialSpec     spec;
+    float        lo = 0.0f, hi = 1.0f;
+    QLabel      *name   = nullptr;
+    QSlider     *slider = nullptr;
+    QLabel      *value  = nullptr;
+    QToolButton *reset  = nullptr;
+};
+
+const int kTrack = 1000;   // slider resolution across a dial's travel
+
+struct OptionsUI {
+    MetalPresenter      *p = nullptr;
+    std::vector<DialRow> rows;
+    QComboBox           *preset  = nullptr;
+    QComboBox           *pattern = nullptr;
+    QLabel              *status  = nullptr;
+
+    static int toTrack(const DialRow &r, float v)
+    {
+        if (r.hi <= r.lo)
+            return 0;
+        return std::clamp(int(std::lround((v - r.lo) / (r.hi - r.lo) * kTrack)), 0, kTrack);
+    }
+
+    /* Show one dial as the engine has it. Signals are blocked so that reading the
+       engine can never write back to it. */
+    void show(DialRow &r)
+    {
+        const float v = p->dial(r.spec.dial);
+        {
+            const QSignalBlocker block(r.slider);
+            r.slider->setValue(toTrack(r, v));
+        }
+        r.value->setText(QString::asprintf(r.spec.format, double(v) * r.spec.scale));
+        // The reset arrow lights up only for a dial the user has moved off the preset,
+        // which makes it double as the "what have I changed?" indicator.
+        r.reset->setEnabled(p->dialIsSet(r.spec.dial));
+
+        const bool color   = p->isColor();
+        const bool applies = r.spec.needs == DialSpec::Always
+                          || (r.spec.needs == DialSpec::Color && color)
+                          || (r.spec.needs == DialSpec::Pattern && color && p->phosphorPattern() != 0);
+        r.name->setEnabled(applies);
+        r.slider->setEnabled(applies);
+        r.value->setEnabled(applies);
+    }
+
+    void refresh()
+    {
+        {
+            const QSignalBlocker block(preset);
+            preset->setCurrentIndex(p->currentPreset());
+        }
+        {
+            const QSignalBlocker block(pattern);
+            pattern->setCurrentIndex(std::clamp(p->phosphorPattern(), 0, 3));
+            pattern->setEnabled(p->isColor());   // a mono tube has no mask to choose
+        }
+        for (auto &r : rows)
+            show(r);
+        status->setText(QString::fromStdString(p->status()));
+    }
+};
+
+} // namespace
+#endif
 
 QDialog *
 MetalRenderer::getOptions(QWidget *parent)
 {
-    MetalPresenter *p = presenter.get();
+#ifdef USE_CRTENGINE
+    auto ui = std::make_shared<OptionsUI>();
+    ui->p   = presenter.get();
+
     auto *dlg = new QDialog(parent);
     dlg->setWindowTitle(tr("CRT Monitor Options"));
-    auto *form = new QFormLayout(dlg);
+    auto *root = new QVBoxLayout(dlg);
 
-    // Initialize each control to the persisted value (or the nominal default).
-    // CRT preset — highest-level choice. Combo order MUST match kCrtPresetNames in
-    // metal_presenter.mm (0=Green … 5=VGA monitor).
-    auto *preset = new QComboBox();
-    preset->addItems({ tr("Green monitor"), tr("Amber monitor"), tr("White monitor"),
-                       tr("NTSC B&W TV"), tr("NTSC color TV"), tr("VGA monitor") });
-    preset->setCurrentIndex(std::clamp(int(std::lround(p->persistedValue("crt.preset", 5))), 0, 5));
-    QObject::connect(preset, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                     [p](int idx) { p->setPreset(idx); });
-    form->addRow(tr("CRT preset"), preset);
+    // ---- The tube ----
+    auto *top = new QHBoxLayout();
+    ui->preset = new QComboBox();
+    for (int i = 0; i < ui->p->presetCount(); i++)
+        ui->preset->addItem(QString::fromUtf8(ui->p->presetName(i)));
+    auto *presetLabel = new QLabel(tr("Monitor"));
+    presetLabel->setBuddy(ui->preset);
+    top->addWidget(presetLabel);
+    top->addWidget(ui->preset, 1);
+    root->addLayout(top);
 
-    addSection(form, tr("Picture"));
-    addSlider(form, tr("Brightness"), -0.4, 0.5, p->persistedValue("crt.brightness", 0.0),  [p](float v) { p->setBrightness(v); });
-    addSlider(form, tr("Contrast"),    0.1, 3.0, p->persistedValue("crt.contrast", 1.5),    [p](float v) { p->setContrast(v); });
+    auto *tabs = new QTabWidget();
+    root->addWidget(tabs, 1);
 
-    addSection(form, tr("HDR"));
-    // EDR is headroom for the tube's PEAKS, not a picture gain: the picture body is
-    // identity on every panel; only >reference-white content (mask sparkle, highlights)
-    // rises into the panel's measured headroom, capped by this allowance. 1.0 = SDR look.
-    addSlider(form, tr("Peak highlights (SDR ↔ full)"), 1.0, 8.0, p->persistedValue("crt.peaks", 2.5), [p](float v) { p->setPeakHighlights(v); });
-    // (No "Mask softening" control: as of CRTEngine 1.4.0 the display shader's automatic
-    // Nyquist band-limit flattens the mask on its own when it can't be resolved, so the
-    // manual HDR mask-dim was redundant.)
+    // One page of dial rows: name | slider | value | reset.
+    auto addPage = [&](const QString &title) {
+        auto *page = new QWidget();
+        auto *grid = new QGridLayout(page);
+        grid->setColumnStretch(1, 1);
+        grid->setColumnMinimumWidth(1, 260);
+        tabs->addTab(page, title);
+        return grid;
+    };
+    // Room for the widest reading, so the sliders do not shift as values change.
+    const int valueWidth = dlg->fontMetrics().horizontalAdvance(QStringLiteral("+00.00 lines"));
 
-    addSection(form, tr("Phosphor"));
-    auto *pattern = new QComboBox();
-    pattern->addItems({ tr("Triode (delta)"), tr("Stripe (aperture grille)"),
-                        tr("Shadow mask"), tr("Slot mask") });
-    pattern->setCurrentIndex(int(p->persistedValue("crt.pattern", 1)));   // VGA preset = stripe
-    QObject::connect(pattern, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                     [p](int idx) { p->setPhosphorPattern(idx); });
-    form->addRow(tr("Pattern"), pattern);
+    auto addDial = [&](QGridLayout *grid, const DialSpec &spec) {
+        DialRow r;
+        r.spec = spec;
+        ui->p->dialRange(spec.dial, &r.lo, &r.hi);
 
-    // RGB mask scale (Pattern Scale) — 1× is the tube's real physical phosphor pitch; higher
-    // coarsens the grille so it reads at smaller window sizes (a fine VGA tube is sub-Nyquist
-    // at typical sizes and needs several ×). CRTEngine 1.4.0 supports 1–10×.
-    addSlider(form, tr("RGB scale (1–10×)"), 1.0, 10.0, p->persistedValue("crt.maskscale", 1.0), [p](float v) { p->setMaskScale(v); });
+        r.name   = new QLabel(spec.label);
+        r.slider = new QSlider(Qt::Horizontal);
+        r.slider->setRange(0, kTrack);
+        r.slider->setPageStep(kTrack / 20);
+        r.value = new QLabel();
+        r.value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        r.value->setMinimumWidth(valueWidth);
+        r.reset = new QToolButton();
+        r.reset->setText(QStringLiteral("↺"));
+        r.reset->setAutoRaise(true);
+        r.reset->setToolTip(tr("Back to this monitor's own setting"));
+        r.name->setToolTip(spec.help);
+        r.slider->setToolTip(spec.help);
 
+        const int row = grid->rowCount();
+        grid->addWidget(r.name, row, 0);
+        grid->addWidget(r.slider, row, 1);
+        grid->addWidget(r.value, row, 2);
+        grid->addWidget(r.reset, row, 3);
 
-    addSection(form, tr("Beam"));
-    addSlider(form, tr("Sharpness (soft ↔ sharp)"), 0.0, 1.0, p->persistedValue("crt.sharpness", 0.5), [p](float v) { p->setSharpness(v); });
-    // Video bandwidth: the analog-chain reconstruction rolloff β. LOWER = wider flat
-    // passband = crisper horizontal detail (with more sinc-ringing on hard edges);
-    // HIGHER = softer, less ringing. 0 drops the reconstruction entirely for a
-    // ringless (but resample-beat-unprotected) pristine-VGA look — the anti-banding
-    // reconstruction is no longer forced always-on; it's the user's trade-off.
-    addSlider(form, tr("Video bandwidth (crisp ↔ soft)"), 0.0, 1.0, p->persistedValue("crt.hbandwidth", 0.5), [p](float v) { p->setHBandwidth(v); });
-    // Optical horizontal defocus of the beam spot, in source pixels. 0 = focused.
-    // Bipolar like the real focus pot: 0 = sweet spot, either direction blurs.
-    addSlider(form, tr("H focus (◄ 0 ►)"), -3.0, 3.0, p->persistedValue("crt.hfocus", 0.0), [p](float v) { p->setHFocus(v); });
-    // (Beam sweep dial removed: the beam is pinned to the dot — the tube's
-    // physical truth. The user-facing control is the OBSERVER:)
-    // 1 = fused eye (steady), lower = camera shutter — the rolling band /
-    // flicker of filmed CRT footage.
-    addSlider(form, tr("Shutter (camera ↔ eye)"), 0.0, 1.0, p->persistedValue("crt.shutter", 1.0), [p](float v) { p->setShutter(v); });
-    // (Scanline smoothing + Pattern smoothing sliders removed: they dialed
-    // display-shader anti-alias parameters, not tube physics — simulation-first
-    // cleanup. Engine defaults stay active internally.)
-    addSlider(form, tr("Edge focus loss"),      0.0, 1.0,  p->persistedValue("crt.edge", 0.21),  [p](float v) { p->setEdgeFocus(v); });
-    addSlider(form, tr("Bloom"),                0.0, 0.5,  p->persistedValue("crt.bloom", 0.0),  [p](float v) { p->setBloom(v); });
-    addSlider(form, tr("Convergence (◄ 0 ►)"), -10.0, 10.0, p->persistedValue("crt.convergence", 0.0), [p](float v) { p->setConvergence(v); });
+        const size_t idx = ui->rows.size();
+        ui->rows.push_back(r);
+        QObject::connect(r.slider, &QSlider::valueChanged, dlg, [ui, idx](int t) {
+            DialRow &row = ui->rows[idx];
+            ui->p->setDial(row.spec.dial, row.lo + (row.hi - row.lo) * float(t) / float(kTrack));
+            ui->show(row);
+        });
+        QObject::connect(r.reset, &QToolButton::clicked, dlg, [ui, idx]() {
+            ui->p->resetDial(ui->rows[idx].spec.dial);
+            ui->show(ui->rows[idx]);
+        });
+    };
+    auto endPage = [](QGridLayout *grid) { grid->setRowStretch(grid->rowCount(), 1); };
 
-    addSection(form, tr("Monitor conditions"));
-    addSlider(form, tr("H-jitter"),     0.0, 3.0,  p->persistedValue("crt.hjitter", 0.0),     [p](float v) { p->setHJitter(v); });
-    addSlider(form, tr("V-jitter"),     0.0, 2.0,  p->persistedValue("crt.vjitter", 0.0),     [p](float v) { p->setVJitter(v); });
-    addSlider(form, tr("Shot noise"),   0.0, 0.05, p->persistedValue("crt.shotnoise", 0.0),   [p](float v) { p->setShotNoise(v); });
-    addSlider(form, tr("Signal noise"), 0.0, 0.15, p->persistedValue("crt.signalnoise", 0.0), [p](float v) { p->setSignalNoise(v); });
+    using D = DialSpec;
 
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close);
+    // ---- Picture ----
+    auto *picture = addPage(tr("Picture"));
+    addDial(picture, { CRT_DIAL_BRIGHTNESS, tr("Brightness"), "%+.2f", 1.0, D::Always,
+        tr("The black level: lifts or lowers the whole picture.") });
+    addDial(picture, { CRT_DIAL_CONTRAST, tr("Contrast"), "%.2f", 1.0, D::Always,
+        tr("The video gain: how hard the picture drives the tube.") });
+    addDial(picture, { CRT_DIAL_SATURATION, tr("Saturation"), "%.2f", 1.0, D::Color,
+        tr("Colour strength. 1.00 is the signal as sent.") });
+    addDial(picture, { CRT_DIAL_PEAK_HIGHLIGHTS, tr("Peak highlights"), "%.1f×", 1.0, D::Always,
+        tr("How far the tube's brightest points may rise above white on an HDR display.\n"
+           "1.0× is the SDR look. The display's own headroom is always the limit, and the\n"
+           "body of the picture is unchanged at any setting.") });
+    endPage(picture);
+
+    // ---- Tube: the phosphor screen and the glass in front of it ----
+    auto *tube = addPage(tr("Tube"));
+    ui->pattern = new QComboBox();
+    ui->pattern->addItems({ tr("None (triode)"), tr("Stripe (aperture grille)"),
+                            tr("Shadow mask"), tr("Slot mask") });
+    ui->pattern->setToolTip(tr("The colour phosphor layout. Monochrome monitors have none."));
+    {
+        auto *l = new QLabel(tr("Phosphor pattern"));
+        l->setBuddy(ui->pattern);
+        const int row = tube->rowCount();
+        tube->addWidget(l, row, 0);
+        tube->addWidget(ui->pattern, row, 1, 1, 3);
+    }
+    addDial(tube, { CRT_DIAL_PATTERN_SCALE, tr("Pattern size"), "%.1f px", 1.0, D::Pattern,
+        tr("Width of one red-green-blue group in screen pixels. Below about 3 px the\n"
+           "pattern is finer than the screen can show and blends into an even sheen.") });
+    addDial(tube, { CRT_DIAL_PATTERN_FOCUS, tr("Pattern focus"), "%.2f", 1.0, D::Pattern,
+        tr("How tightly the beam lands on a single phosphor: higher is crisper and more\n"
+           "saturated, lower is softer and fainter.") });
+    addDial(tube, { CRT_DIAL_CURVATURE, tr("Glass curvature"), "%.2f", 1.0, D::Always,
+        tr("0 is a flat screen, 1.00 is this tube's real curvature, above that is\n"
+           "rounder than any tube that shipped.") });
+    addDial(tube, { CRT_DIAL_HALATION, tr("Halation"), "%.2f", 1.0, D::Always,
+        tr("The broad halo around bright areas, from light reflected back inside the\n"
+           "glass. 1.00 is the amount this tube's glass really returns.") });
+    addDial(tube, { CRT_DIAL_SCATTER, tr("Glass haze"), "%.2f", 1.0, D::Always,
+        tr("The soft local glow of an etched, anti-glare screen surface. 0 is polished glass.") });
+    addDial(tube, { CRT_DIAL_OVERSCAN, tr("Picture size"), "%+.1f %%", 100.0, D::Always,
+        tr("The size control on the back of the set. Positive pushes the picture's edges\n"
+           "behind the bezel (overscan); negative shrinks it inside the glass (underscan).") });
+    addDial(tube, { CRT_DIAL_VIGNETTE, tr("Vignette"), "%.2f", 1.0, D::Always,
+        tr("Darkening toward the edges of the screen.") });
+    endPage(tube);
+
+    // ---- Beam ----
+    auto *beam = addPage(tr("Beam"));
+    addDial(beam, { CRT_DIAL_SHARPNESS, tr("Sharpness"), "%.2f", 1.0, D::Always,
+        tr("The beam's height. Low fills the space between scanlines; high draws thin,\n"
+           "separate lines. At high resolutions the lines are too close for this to show.") });
+    addDial(beam, { CRT_DIAL_H_BANDWIDTH, tr("Video bandwidth"), "%.2f", 1.0, D::Always,
+        tr("How fast the video amplifier follows the signal. Lower is crisper with slight\n"
+           "ringing on hard edges; higher is softer. 0 is a plain ringless spot.") });
+    addDial(beam, { CRT_DIAL_H_FOCUS, tr("Focus"), "%+.2f px", 1.0, D::Always,
+        tr("The focus control: 0 is in focus, and turning it either way blurs the spot.") });
+    addDial(beam, { CRT_DIAL_SHUTTER, tr("Shutter"), "%.2f", 1.0, D::Always,
+        tr("Who is watching. 1.00 is the eye, which sees a steady picture; lower is a\n"
+           "camera with an ever faster shutter — flicker and a rolling band.") });
+    addDial(beam, { CRT_DIAL_EDGE_FOCUS, tr("Edge focus loss"), "%.2f", 1.0, D::Always,
+        tr("How much the beam defocuses toward the edges of the screen.") });
+    addDial(beam, { CRT_DIAL_BLOOM, tr("Bloom"), "%.2f", 1.0, D::Always,
+        tr("How much the beam swells in bright areas.") });
+    addDial(beam, { CRT_DIAL_CONVERGENCE, tr("Convergence"), "%+.1f", 1.0, D::Color,
+        tr("Misalignment of the three colour beams. 0 is converged; the sign chooses\n"
+           "which way the colour fringes fall.") });
+    endPage(beam);
+
+    // ---- Signal and wear ----
+    auto *wear = addPage(tr("Signal && Wear"));
+    addDial(wear, { CRT_DIAL_H_JITTER, tr("Horizontal jitter"), "%.2f px", 1.0, D::Always,
+        tr("Scanlines shifting sideways from line to line.") });
+    addDial(wear, { CRT_DIAL_V_JITTER, tr("Vertical jitter"), "%.2f lines", 1.0, D::Always,
+        tr("The whole picture bouncing from frame to frame.") });
+    addDial(wear, { CRT_DIAL_SHOT_NOISE, tr("Beam noise"), "%.3f", 1.0, D::Always,
+        tr("Fine grain from the beam itself.") });
+    addDial(wear, { CRT_DIAL_SIGNAL_NOISE, tr("Signal noise"), "%.3f", 1.0, D::Always,
+        tr("Snow on the incoming signal.") });
+    endPage(wear);
+
+    // ---- What the tube is doing ----
+    // This is a diagnostic host: the numbers that explain a picture — the signal the
+    // tube is locked to, the lines and buffer the engine chose, how many screen pixels
+    // each scanline gets — are shown here instead of only in the log, and can be
+    // selected and copied.
+    ui->status = new QLabel();
+    ui->status->setWordWrap(true);
+    ui->status->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    ui->status->setEnabled(false);   // secondary text colour
+    {
+        QFont f = ui->status->font();
+        f.setPointSizeF(f.pointSizeF() * 0.85);
+        ui->status->setFont(f);
+    }
+    root->addWidget(ui->status);
+
+    auto *buttons  = new QDialogButtonBox(QDialogButtonBox::Close);
+    auto *resetAll = buttons->addButton(tr("Reset All to Monitor Defaults"), QDialogButtonBox::ResetRole);
+    root->addWidget(buttons);
+
+    // ---- Behaviour ----
+    QObject::connect(ui->preset, QOverload<int>::of(&QComboBox::currentIndexChanged), dlg,
+                     [ui](int idx) {
+                         ui->p->setPreset(idx);
+                         ui->refresh();   // the new tube's starting positions and applicability
+                     });
+    QObject::connect(ui->pattern, QOverload<int>::of(&QComboBox::currentIndexChanged), dlg,
+                     [ui](int idx) {
+                         ui->p->setPhosphorPattern(idx);
+                         ui->refresh();   // pattern size/focus only apply with a mask
+                     });
+    QObject::connect(resetAll, &QPushButton::clicked, dlg, [ui]() {
+        ui->p->resetAll();
+        ui->refresh();
+    });
     QObject::connect(buttons, &QDialogButtonBox::rejected, dlg, &QDialog::accept);
-    form->addRow(buttons);
 
+    // The signal changes under the dialog (the guest switches video mode), and the
+    // Sharpness dial's preset position moves with it, so keep the status line live.
+    // Stopped when the dialog finishes: the dialog object outlives exec(), and the
+    // presenter it reads may not.
+    auto *tick = new QTimer(dlg);
+    QObject::connect(tick, &QTimer::timeout, dlg, [ui]() {
+        ui->status->setText(QString::fromStdString(ui->p->status()));
+    });
+    QObject::connect(dlg, &QDialog::finished, tick, &QTimer::stop);
+    tick->start(500);
+
+    ui->refresh();
     return dlg;
+#else
+    (void) parent;
+    return nullptr;
+#endif
 }
